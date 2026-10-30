@@ -45,7 +45,15 @@
 
 /* ---------- Filament stack ---------- */
 .wb-stack { display: flex; gap: 12px; align-items: stretch; }
-.wb-stack__rows { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.wb-stack__rows { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; position: relative; }
+.wb-stack__rows[data-reordering="true"] .wb-stack-row:not([data-dragging="true"]) {
+  transition: transform 160ms cubic-bezier(.2,.8,.2,1), background var(--fast), box-shadow var(--fast);
+}
+.wb-stack__insert {
+  position: absolute; left: 4px; right: 4px; height: 2px; margin-top: -1px; border-radius: 2px;
+  background: var(--accent); pointer-events: none; z-index: 1; animation: wb-insert-in 140ms ease-out;
+}
+@keyframes wb-insert-in { from { opacity: 0; transform: scaleX(0.6); } }
 .wb-stack-row {
   display: flex; align-items: center; gap: 6px; padding: 6px 2px 6px 4px; border-radius: var(--r-md);
   background: var(--raised); transition: background var(--fast), box-shadow var(--fast);
@@ -67,6 +75,7 @@
 .wb-stack-row[data-dragging="true"] {
   position: relative; z-index: 2; background: var(--hover); transition: box-shadow var(--fast);
   box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  opacity: 0.9;
 }
 .wb-stack-row[data-drop="true"] { box-shadow: inset 0 0 0 1.5px var(--accent); }
 .wb-stack-row__grip {

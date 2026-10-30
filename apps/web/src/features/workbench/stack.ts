@@ -72,3 +72,18 @@ export function swapFilaments(stack: StackEntry[], a: string, b: string): StackE
   if (!fa || !fb || a === b) return stack;
   return stack.map((e) => (e.slotId === a ? { ...e, filament: fb } : e.slotId === b ? { ...e, filament: fa } : e));
 }
+
+/**
+ * Move one slot's filament to position `toIndex` (base = 0) and shift the
+ * filaments in between by one slot. Every slot keeps its own layer range.
+ */
+export function moveFilament(stack: StackEntry[], slotId: string, toIndex: number): StackEntry[] {
+  const sorted = sortStack(stack);
+  const from = sorted.findIndex((e) => e.slotId === slotId);
+  const to = Math.max(0, Math.min(sorted.length - 1, toIndex));
+  if (from < 0 || from === to) return stack;
+  const filaments = sorted.map((e) => e.filament);
+  const [moved] = filaments.splice(from, 1);
+  filaments.splice(to, 0, moved);
+  return sorted.map((e, i) => (e.filament === filaments[i] ? e : { ...e, filament: filaments[i] }));
+}

@@ -81,7 +81,7 @@ export const t = {
     td: 'TD',
     topOfPrint: 'Topo',
     bottomOfPrint: 'Base',
-    dragHint: 'Arraste as divisões para mudar onde cada filamento começa. Arraste pela alça ⋮⋮ para trocar as cores de posição.',
+    dragHint: 'Arraste as divisões para mudar onde cada filamento começa. Arraste pela alça ⋮⋮ sobre outra cor para trocá-las, ou entre duas para encaixar no meio.',
     reorder: 'Arraste para trocar a cor com outra faixa (Alt+↑/↓)',
   },
 

@@ -17,5 +17,5 @@ export default defineConfig(({ mode }) => ({
     mode === 'bench'
       ? // `pnpm --filter @huecraft/engine bench` (or `vitest run --mode bench`)
         { include: ['packages/engine/src/bench.ts'], testTimeout: 120_000 }
-      : { include: ['packages/**/*.test.ts'] },
+      : { include: ['packages/**/*.test.ts', 'apps/**/*.test.ts'] },
 }));

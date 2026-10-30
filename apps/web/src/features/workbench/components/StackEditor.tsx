@@ -17,7 +17,7 @@ import {
   Segmented,
 } from '@huecraft/design-system';
 import { formatMm, t } from '../../../i18n';
-import { addOnTop, removeSlot, replaceFilament, setStartLayer, sortStack, swapFilaments } from '../stack';
+import { addOnTop, removeSlot, replaceFilament, setStartLayer, moveFilament, sortStack, swapFilaments } from '../stack';
 import type { Workbench } from '../useWorkbench';
 import { FilamentEditor } from './FilamentEditor';
 
@@ -33,9 +33,12 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
 
   const editing = editor?.mode === 'edit' ? stack.find((e) => e.slotId === editor.slotId) : undefined;
 
-  // Dragging a row by its grip swaps its filament with the row it is dropped on;
-  // the layer ranges stay where they are.
-  type Reorder = { from: string; over: string | null; startY: number; dy: number };
+  // Dragging a row by its grip moves its filament; the layer ranges stay where they are.
+  // Over the middle of a row the two filaments swap; near the edge between two rows
+  // the filament slots in there and the ones in between shift by one.
+  const rows = [...stack].reverse(); // display order: top of the print first
+  type DropTarget = { kind: 'swap'; slotId: string } | { kind: 'gap'; gap: number; y: number };
+  type Reorder = { from: string; target: DropTarget | null; startY: number; dy: number };
   const [reorder, setReorderState] = useState<Reorder | null>(null);
   // Mirrors the state so pointer handlers never read a stale render.
   const reorderRef = useRef<Reorder | null>(null);
@@ -44,21 +47,51 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
     setReorderState(r);
   };
   const rowsRef = useRef<HTMLOListElement>(null);
-  // Row under the pointer, using untransformed boxes (the dragged row itself follows the pointer).
-  const slotAt = (r: Reorder, y: number) => {
-    for (const el of rowsRef.current?.querySelectorAll<HTMLElement>('[data-slot]') ?? []) {
-      const box = el.getBoundingClientRect();
-      const dy = el.dataset.slot === r.from ? r.dy : 0;
-      if (y >= box.top - dy - 2 && y <= box.bottom - dy + 2) return el.dataset.slot ?? null;
+  // A gap right above or below the dragged row would not change anything.
+  const isNoopGap = (gap: number, from: number) => gap === from || gap === from + 1;
+
+  const targetAt = (r: Reorder, clientY: number): DropTarget | null => {
+    const list = rowsRef.current;
+    if (!list) return null;
+    // Layout boxes (offsetTop/offsetHeight) ignore the drag and spread transforms.
+    const els = [...list.querySelectorAll<HTMLElement>('[data-slot]')];
+    const y = clientY - list.getBoundingClientRect().top;
+    const from = els.findIndex((el) => el.dataset.slot === r.from);
+    const gapY = (g: number) =>
+      g === 0 ? els[0].offsetTop - 2 : els[g - 1].offsetTop + els[g - 1].offsetHeight + 2;
+    const gap = (g: number): DropTarget | null => (isNoopGap(g, from) ? null : { kind: 'gap', gap: g, y: gapY(g) });
+    for (let i = 0; i < els.length; i++) {
+      const top = els[i].offsetTop;
+      const h = els[i].offsetHeight;
+      if (y < top + h * 0.25) return gap(i);
+      if (y <= top + h * 0.75) return els[i].dataset.slot === r.from ? null : { kind: 'swap', slotId: els[i].dataset.slot! };
     }
-    return r.over;
+    return gap(els.length);
   };
   const dragTo = (y: number) => {
     const r = reorderRef.current;
-    if (r) setReorder({ ...r, over: slotAt(r, y), dy: y - r.startY });
+    if (r) setReorder({ ...r, target: targetAt(r, y), dy: y - r.startY });
+  };
+  const drop = () => {
+    const r = reorderRef.current;
+    setReorder(null);
+    const target = r?.target;
+    if (!r || !target) return;
+    if (target.kind === 'swap') {
+      wb.updateStack((s) => swapFilaments(s, r.from, target.slotId));
+    } else {
+      const from = rows.findIndex((e) => e.slotId === r.from);
+      const display = target.gap > from ? target.gap - 1 : target.gap;
+      wb.updateStack((s) => moveFilament(s, r.from, rows.length - 1 - display));
+    }
+  };
+  // Rows part around the gap the filament would slot into.
+  const spreadOf = (displayIndex: number) => {
+    const target = reorder?.target;
+    if (!target || target.kind !== 'gap') return 0;
+    return displayIndex < target.gap ? -5 : 5;
   };
   const swapWith = (slotId: string, offset: number) => {
-    const rows = [...stack].reverse();
     const target = rows[rows.findIndex((e) => e.slotId === slotId) + offset];
     if (target) wb.updateStack((s) => swapFilaments(s, slotId, target.slotId));
   };
@@ -133,9 +166,14 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
             onHot={setHot}
             onMove={(slotId, layer) => wb.updateStack((s) => setStartLayer(s, slotId, layer, total), `drag:${slotId}`)}
           />
-          <ol className="wb-stack__rows" ref={rowsRef}>
-            {[...stack].reverse().map((entry) => {
+          <ol className="wb-stack__rows" ref={rowsRef} data-reordering={!!reorder}>
+            {reorder?.target?.kind === 'gap' && (
+              <span className="wb-stack__insert" style={{ top: reorder.target.y }} aria-hidden />
+            )}
+            {rows.map((entry, displayIndex) => {
               const index = stack.indexOf(entry);
+              const dragged = reorder?.from === entry.slotId;
+              const spread = dragged ? 0 : spreadOf(displayIndex);
               const isBase = index === 0;
               const outOfRange = entry.startLayer >= total;
               const hidden = wb.hiddenSlots.includes(entry.slotId);
@@ -147,9 +185,15 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
                   data-hot={hot === entry.slotId}
                   data-out={outOfRange}
                   data-hidden={hidden}
-                  data-dragging={reorder?.from === entry.slotId}
-                  data-drop={!!reorder && reorder.over === entry.slotId && reorder.from !== entry.slotId}
-                  style={reorder?.from === entry.slotId ? { transform: `translateY(${reorder.dy}px)` } : undefined}
+                  data-dragging={dragged}
+                  data-drop={reorder?.target?.kind === 'swap' && reorder.target.slotId === entry.slotId}
+                  style={
+                    dragged
+                      ? { transform: `translateY(${reorder!.dy}px)` }
+                      : spread
+                        ? { transform: `translateY(${spread}px)` }
+                        : undefined
+                  }
                   onPointerEnter={() => setHot(entry.slotId)}
                   onPointerLeave={() => setHot(null)}
                 >
@@ -163,18 +207,13 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
                       if (e.button !== 0) return;
                       e.preventDefault();
                       e.currentTarget.setPointerCapture(e.pointerId);
-                      setReorder({ from: entry.slotId, over: entry.slotId, startY: e.clientY, dy: 0 });
+                      setReorder({ from: entry.slotId, target: null, startY: e.clientY, dy: 0 });
                     }}
                     onPointerMove={(e) => dragTo(e.clientY)}
                     onPointerUp={(e) => {
                       e.currentTarget.releasePointerCapture(e.pointerId);
                       dragTo(e.clientY);
-                      const r = reorderRef.current;
-                      if (r?.over && r.over !== r.from) {
-                        const { from, over } = r;
-                        wb.updateStack((s) => swapFilaments(s, from, over));
-                      }
-                      setReorder(null);
+                      drop();
                     }}
                     onPointerCancel={() => setReorder(null)}
                     onKeyDown={(e) => {
