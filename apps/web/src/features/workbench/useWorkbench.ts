@@ -113,6 +113,8 @@ export function useWorkbench() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [exporting, setExporting] = useState(false);
   const [slicerTemplate, setSlicerTemplateState] = useState<SlicerTemplate | null>(null);
+  // Preview-only: slots hidden here are skipped by the preview, never by exports.
+  const [hiddenSlots, setHiddenSlots] = useState<string[]>([]);
   const autoDistributePending = useRef(false);
   const booted = useRef(false);
 
@@ -173,18 +175,31 @@ export function useWorkbench() {
 
   /* ---------- engine ---------- */
 
+  const visibleStack = useMemo(() => {
+    const visible = project.stack.filter((e) => !hiddenSlots.includes(e.slotId));
+    return visible.length > 0 ? visible : project.stack;
+  }, [project.stack, hiddenSlots]);
+  const hiddenCount = project.stack.length - visibleStack.length;
+
+  const toggleHidden = useCallback((slotId: string) => {
+    setHiddenSlots((h) => (h.includes(slotId) ? h.filter((s) => s !== slotId) : [...h, slotId]));
+  }, []);
+
+  // A different project has different slots.
+  useEffect(() => setHiddenSlots([]), [project.id]);
+
   const previewParams = useMemo<PreviewParams | null>(
     () =>
-      project.stack.length > 0
+      visibleStack.length > 0
         ? {
             relief: project.relief,
             print: project.print,
-            stack: project.stack,
+            stack: visibleStack,
             maxEdge: PREVIEW_MAX_EDGE,
             simulateLineWidth,
           }
         : null,
-    [project.relief, project.print, project.stack, simulateLineWidth],
+    [project.relief, project.print, visibleStack, simulateLineWidth],
   );
 
   const engine = useEngine(image?.source ?? null, previewParams);
@@ -402,6 +417,9 @@ export function useWorkbench() {
     recent,
     profile,
     simulateLineWidth,
+    hiddenSlots,
+    hiddenCount,
+    toggleHidden,
     saveState,
     toast,
     exporting,

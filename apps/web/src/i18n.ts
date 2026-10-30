@@ -70,6 +70,8 @@ export const t = {
     layerShort: 'cam.',
     edit: 'Editar filamento',
     remove: 'Remover',
+    hide: 'Ocultar no preview (a exportação não muda)',
+    show: 'Mostrar no preview',
     swapCommand: 'Comando de troca no 3MF',
     pause: 'Pausa',
     colorChange: 'Troca de cor (M600)',
@@ -131,6 +133,7 @@ export const t = {
     size: (w: string, h: string, z: string) => `${w} × ${h} × ${z} mm`,
     layers: (n: number) => `${n} camadas`,
     swaps: (n: number) => (n === 1 ? '1 troca' : `${n} trocas`),
+    hidden: (n: number) => (n === 1 ? '1 cor oculta no preview' : `${n} cores ocultas no preview`),
   },
 
   template: {

@@ -190,6 +190,7 @@ export function Stage({
                   <span key={e.slotId} className="wb-swatch wb-swatch--xs" style={{ background: e.filament.colorHex }} title={e.filament.name} />
                 ))}
             </span>
+            {wb.hiddenCount > 0 && <span className="wb-status__hidden">{t.status.hidden(wb.hiddenCount)}</span>}
           </>
         ) : (
           <span>{t.stage.computing}</span>

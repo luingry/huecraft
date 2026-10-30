@@ -4,6 +4,8 @@ import { layerTopZ, type StackEntry, type StackFilament } from '@huecraft/projec
 import {
   Button,
   IconButton,
+  IconEye,
+  IconEyeOff,
   IconGrip,
   IconPlus,
   IconTrash,
@@ -126,6 +128,7 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
             total={total}
             histogram={wb.result?.layerHistogram ?? null}
             baseLayers={wb.result?.baseLayers ?? 1}
+            hidden={wb.hiddenSlots}
             hot={hot}
             onHot={setHot}
             onMove={(slotId, layer) => wb.updateStack((s) => setStartLayer(s, slotId, layer, total), `drag:${slotId}`)}
@@ -135,6 +138,7 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
               const index = stack.indexOf(entry);
               const isBase = index === 0;
               const outOfRange = entry.startLayer >= total;
+              const hidden = wb.hiddenSlots.includes(entry.slotId);
               return (
                 <li
                   key={entry.slotId}
@@ -142,6 +146,7 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
                   data-slot={entry.slotId}
                   data-hot={hot === entry.slotId}
                   data-out={outOfRange}
+                  data-hidden={hidden}
                   data-dragging={reorder?.from === entry.slotId}
                   data-drop={!!reorder && reorder.over === entry.slotId && reorder.from !== entry.slotId}
                   style={reorder?.from === entry.slotId ? { transform: `translateY(${reorder.dy}px)` } : undefined}
@@ -213,6 +218,16 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
                       <span className="wb-stack-row__z">Z {formatMm(layerTopZ(print, entry.startLayer), 2)}</span>
                     </div>
                   )}
+                  <div className="wb-stack-row__actions">
+                  <IconButton
+                    label={hidden ? t.stack.show : t.stack.hide}
+                    className="wb-stack-row__eye"
+                    aria-pressed={hidden}
+                    disabled={!hidden && wb.project.stack.length - wb.hiddenCount <= 1}
+                    onClick={() => wb.toggleHidden(entry.slotId)}
+                  >
+                    {hidden ? <IconEyeOff size={14} /> : <IconEye size={14} />}
+                  </IconButton>
                   <IconButton
                     label={t.stack.remove}
                     danger
@@ -221,6 +236,7 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
                   >
                     <IconTrash size={14} />
                   </IconButton>
+                  </div>
                 </li>
               );
             })}
@@ -305,6 +321,7 @@ function StackBar({
   total,
   histogram,
   baseLayers,
+  hidden,
   hot,
   onHot,
   onMove,
@@ -313,6 +330,7 @@ function StackBar({
   total: number;
   histogram: Uint32Array | null;
   baseLayers: number;
+  hidden: string[];
   hot: string | null;
   onHot: (slotId: string | null) => void;
   onMove: (slotId: string, layer: number) => void;
@@ -340,6 +358,7 @@ function StackBar({
             key={e.slotId}
             className="wb-stackbar__band"
             data-hot={hot === e.slotId}
+            data-hidden={hidden.includes(e.slotId)}
             style={{ bottom: pct(e.startLayer), height: `calc(${pct(end)} - ${pct(e.startLayer)})`, background: e.filament.colorHex }}
           />
         );

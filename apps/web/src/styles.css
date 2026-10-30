@@ -47,11 +47,23 @@
 .wb-stack { display: flex; gap: 12px; align-items: stretch; }
 .wb-stack__rows { list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .wb-stack-row {
-  display: flex; align-items: center; gap: 8px; padding: 6px 4px 6px 6px; border-radius: var(--r-md);
+  display: flex; align-items: center; gap: 6px; padding: 6px 2px 6px 4px; border-radius: var(--r-md);
   background: var(--raised); transition: background var(--fast), box-shadow var(--fast);
 }
 .wb-stack-row[data-hot="true"] { background: var(--hover); }
 .wb-stack-row[data-out="true"] { opacity: 0.45; }
+.wb-stack-row[data-hidden="true"] .wb-swatch,
+.wb-stack-row[data-hidden="true"] .wb-stack-row__info { opacity: 0.35; transition: opacity var(--fast); }
+.wb-stack-row[data-hidden="true"] .wb-stack-row__name { text-decoration: line-through; }
+.wb-stack-row .hc-icon-btn { width: 22px; height: 26px; flex-shrink: 0; }
+.wb-stack-row__actions { display: flex; flex-shrink: 0; }
+.wb-stack-row__eye { color: var(--text-3); }
+.wb-stack-row__eye[aria-pressed="true"] { color: var(--accent); }
+.wb-stackbar__band[data-hidden="true"] {
+  opacity: 0.35;
+  background-image: repeating-linear-gradient(45deg, rgba(0,0,0,0.35) 0 3px, transparent 3px 6px);
+}
+.wb-status__hidden { color: var(--accent); font-weight: 500; }
 .wb-stack-row[data-dragging="true"] {
   position: relative; z-index: 2; background: var(--hover); transition: box-shadow var(--fast);
   box-shadow: 0 8px 24px rgba(0,0,0,0.45);
