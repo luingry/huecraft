@@ -1,0 +1,22 @@
+{
+  "name": "huecraft",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first web workbench for filament painting",
+  "license": "MIT",
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "pnpm --filter @huecraft/web dev",
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "lint": "pnpm -r lint",
+    "bench": "pnpm --filter @huecraft/engine build && node packages/engine/dist/bench.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
