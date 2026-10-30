@@ -4,6 +4,7 @@ import { layerTopZ, type StackEntry, type StackFilament } from '@huecraft/projec
 import {
   Button,
   IconButton,
+  IconGrip,
   IconPlus,
   IconTrash,
   IconWand,
@@ -14,7 +15,7 @@ import {
   Segmented,
 } from '@huecraft/design-system';
 import { formatMm, t } from '../../../i18n';
-import { addOnTop, removeSlot, replaceFilament, setStartLayer, sortStack } from '../stack';
+import { addOnTop, removeSlot, replaceFilament, setStartLayer, sortStack, swapFilaments } from '../stack';
 import type { Workbench } from '../useWorkbench';
 import { FilamentEditor } from './FilamentEditor';
 
@@ -29,6 +30,36 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
   const print = wb.project.print;
 
   const editing = editor?.mode === 'edit' ? stack.find((e) => e.slotId === editor.slotId) : undefined;
+
+  // Dragging a row by its grip swaps its filament with the row it is dropped on;
+  // the layer ranges stay where they are.
+  type Reorder = { from: string; over: string | null; startY: number; dy: number };
+  const [reorder, setReorderState] = useState<Reorder | null>(null);
+  // Mirrors the state so pointer handlers never read a stale render.
+  const reorderRef = useRef<Reorder | null>(null);
+  const setReorder = (r: Reorder | null) => {
+    reorderRef.current = r;
+    setReorderState(r);
+  };
+  const rowsRef = useRef<HTMLOListElement>(null);
+  // Row under the pointer, using untransformed boxes (the dragged row itself follows the pointer).
+  const slotAt = (r: Reorder, y: number) => {
+    for (const el of rowsRef.current?.querySelectorAll<HTMLElement>('[data-slot]') ?? []) {
+      const box = el.getBoundingClientRect();
+      const dy = el.dataset.slot === r.from ? r.dy : 0;
+      if (y >= box.top - dy - 2 && y <= box.bottom - dy + 2) return el.dataset.slot ?? null;
+    }
+    return r.over;
+  };
+  const dragTo = (y: number) => {
+    const r = reorderRef.current;
+    if (r) setReorder({ ...r, over: slotAt(r, y), dy: y - r.startY });
+  };
+  const swapWith = (slotId: string, offset: number) => {
+    const rows = [...stack].reverse();
+    const target = rows[rows.findIndex((e) => e.slotId === slotId) + offset];
+    if (target) wb.updateStack((s) => swapFilaments(s, slotId, target.slotId));
+  };
 
   const onSaveFilament = async (f: StackFilament, toLibrary: boolean) => {
     let filament = f;
@@ -99,7 +130,7 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
             onHot={setHot}
             onMove={(slotId, layer) => wb.updateStack((s) => setStartLayer(s, slotId, layer, total), `drag:${slotId}`)}
           />
-          <ol className="wb-stack__rows">
+          <ol className="wb-stack__rows" ref={rowsRef}>
             {[...stack].reverse().map((entry) => {
               const index = stack.indexOf(entry);
               const isBase = index === 0;
@@ -108,11 +139,47 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
                 <li
                   key={entry.slotId}
                   className="wb-stack-row"
+                  data-slot={entry.slotId}
                   data-hot={hot === entry.slotId}
                   data-out={outOfRange}
+                  data-dragging={reorder?.from === entry.slotId}
+                  data-drop={!!reorder && reorder.over === entry.slotId && reorder.from !== entry.slotId}
+                  style={reorder?.from === entry.slotId ? { transform: `translateY(${reorder.dy}px)` } : undefined}
                   onPointerEnter={() => setHot(entry.slotId)}
                   onPointerLeave={() => setHot(null)}
                 >
+                  <span
+                    className="wb-stack-row__grip"
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`${t.stack.reorder}: ${entry.filament.name}`}
+                    title={t.stack.reorder}
+                    onPointerDown={(e) => {
+                      if (e.button !== 0) return;
+                      e.preventDefault();
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                      setReorder({ from: entry.slotId, over: entry.slotId, startY: e.clientY, dy: 0 });
+                    }}
+                    onPointerMove={(e) => dragTo(e.clientY)}
+                    onPointerUp={(e) => {
+                      e.currentTarget.releasePointerCapture(e.pointerId);
+                      dragTo(e.clientY);
+                      const r = reorderRef.current;
+                      if (r?.over && r.over !== r.from) {
+                        const { from, over } = r;
+                        wb.updateStack((s) => swapFilaments(s, from, over));
+                      }
+                      setReorder(null);
+                    }}
+                    onPointerCancel={() => setReorder(null)}
+                    onKeyDown={(e) => {
+                      if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+                      e.preventDefault();
+                      swapWith(entry.slotId, e.key === 'ArrowUp' ? -1 : 1);
+                    }}
+                  >
+                    <IconGrip size={14} />
+                  </span>
                   <button
                     type="button"
                     className="wb-swatch"

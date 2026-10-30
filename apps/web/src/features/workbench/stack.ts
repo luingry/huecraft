@@ -64,3 +64,11 @@ export function removeSlot(stack: StackEntry[], slotId: string): StackEntry[] {
 export function replaceFilament(stack: StackEntry[], slotId: string, filament: StackFilament): StackEntry[] {
   return stack.map((e) => (e.slotId === slotId ? { ...e, filament } : e));
 }
+
+/** Swap the filaments of two slots; each slot keeps its own layer range. */
+export function swapFilaments(stack: StackEntry[], a: string, b: string): StackEntry[] {
+  const fa = stack.find((e) => e.slotId === a)?.filament;
+  const fb = stack.find((e) => e.slotId === b)?.filament;
+  if (!fa || !fb || a === b) return stack;
+  return stack.map((e) => (e.slotId === a ? { ...e, filament: fb } : e.slotId === b ? { ...e, filament: fa } : e));
+}
