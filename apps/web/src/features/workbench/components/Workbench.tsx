@@ -55,8 +55,24 @@ export function Workbench() {
         setTab(STAGE_TABS[Number(e.key) - 1]);
       }
     };
+    // Ctrl+V with an image on the clipboard (screenshot, copied image or file).
+    const onPaste = (e: ClipboardEvent) => {
+      const item = Array.from(e.clipboardData?.items ?? []).find(
+        (i) => i.kind === 'file' && i.type.startsWith('image/'),
+      );
+      const blob = item?.getAsFile();
+      if (!blob) return;
+      e.preventDefault();
+      // Screenshots arrive as "image.png"; give them a readable project name.
+      const name = blob.name && blob.name !== 'image.png' ? blob.name : `${t.stage.pastedName}.png`;
+      wbRef.current.openImageFile(new File([blob], name, { type: blob.type }));
+    };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('paste', onPaste);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('paste', onPaste);
+    };
   }, []);
 
   return (
