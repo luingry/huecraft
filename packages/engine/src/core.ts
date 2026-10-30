@@ -26,6 +26,8 @@ import {
 } from '@huecraft/optics';
 import { buildSolidHeightfieldMesh, buildTerracedMesh } from '@huecraft/mesh';
 import { export3mf, exportBinaryStl, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
+import { applyPaint, PaintCanvas, type PaintContext } from './paint.js';
+import type { PaintStroke, StackEntry } from '@huecraft/project-schema';
 import type { ExportRequestParams, ExportResult, PreviewParams, PreviewResult, SourceImage } from './protocol.js';
 import { computeSwaps, FALLBACK_FILAMENT, formatSwapPlan, layerFilaments, normalizeStack } from './stack.js';
 
@@ -98,6 +100,7 @@ export class EngineCore {
   private source: LumaAlpha | null = null;
   private grids = new Lru<LumaAlpha>(3);
   private reliefs = new Lru<Float32Array>(4);
+  private paintCache: { key: string; base: Float32Array; canvas: PaintCanvas } | null = null;
 
   setImage(image: SourceImage): void {
     if (!(image.width > 0 && image.height > 0) || image.rgba.length < image.width * image.height * 4) {
@@ -106,6 +109,7 @@ export class EngineCore {
     this.source = extractLumaAlpha(image);
     this.grids.clear();
     this.reliefs.clear();
+    this.paintCache = null;
   }
 
   get hasImage(): boolean {
@@ -137,6 +141,28 @@ export class EngineCore {
     return t;
   }
 
+  /**
+   * Relief with the brush strokes composited. The canvas holding every stroke
+   * but the last is cached, so while a stroke is being drawn only that stroke
+   * is rasterised again.
+   */
+  private painted(size: GridSize, relief: ReliefParams, t: Float32Array, strokes: PaintStroke[] | undefined, ctx: PaintContext): Float32Array {
+    if (!strokes || strokes.length === 0) return t;
+    const model = ctx.model;
+    const key = `${reliefKey(size, relief)}|${model.layerHeightMm}|${model.firstLayerHeightMm}|${model.baseThicknessMm}|${model.maxHeightMm}|${ctx.colors.join(',')}`;
+    const settled = strokes.slice(0, -1);
+    let cache = this.paintCache;
+    if (!cache || cache.key !== key || cache.base !== t || !cache.canvas.isPrefixOf(settled)) {
+      cache = { key, base: t, canvas: new PaintCanvas(t, size.width, size.height, ctx) };
+      this.paintCache = cache;
+    }
+    const canvas = cache.canvas;
+    for (let i = canvas.sigs.length; i < settled.length; i++) canvas.apply(settled[i]);
+    const live = canvas.clone();
+    live.apply(strokes[strokes.length - 1]);
+    return live.current;
+  }
+
   preview(params: PreviewParams): PreviewResult {
     const t0 = performance.now();
     const src = this.requireSource();
@@ -146,7 +172,7 @@ export class EngineCore {
     const grid = previewGridSize(src.width, src.height, params.maxEdge);
     this.grid(grid);
     const t1 = performance.now();
-    const t = this.relief(grid, params.relief);
+    const t = this.painted(grid, params.relief, this.relief(grid, params.relief), params.paint, paintContext(params.paintStack ?? params.stack, print, model));
     const t2 = performance.now();
 
     const full = computeLayerField(t, model);
@@ -227,7 +253,7 @@ export class EngineCore {
     const grid = exportGridSize(src.width, src.height, size.width, print.exportResolutionMm);
     this.grid(grid);
     const t1 = performance.now();
-    const t = this.relief(grid, params.relief);
+    const t = applyPaint(this.relief(grid, params.relief), grid.width, grid.height, params.paint ?? [], paintContext(params.stack, print, model));
     const t2 = performance.now();
 
     // Top surface: snapped to the layer top the slicer will print (mid-plane
@@ -301,6 +327,13 @@ export class EngineCore {
       },
     };
   }
+}
+
+/** Printed colour per layer count, for the colour-aware brush blends. */
+function paintContext(stack: StackEntry[], print: PrintParams, model: LayerModel): PaintContext {
+  const layers = layerFilaments(normalizeStack(stack), model.totalLayers);
+  const thickness = (k: number) => (k === 0 ? print.firstLayerHeightMm : print.layerHeightMm);
+  return { model, colors: buildPrintedLut(layers, thickness) };
 }
 
 /** Pure preview: no caching across calls. */

@@ -134,6 +134,43 @@ export const t = {
     computing: 'Calculando…',
   },
 
+  brush: {
+    toggle: 'Pincel',
+    toggleHint: 'Pintar uma área com um filamento direto no 3D (B)',
+    hint: 'Arraste para pintar · Alt+arrastar ou botão do meio para girar · Botão direito: ajustes',
+    settings: 'Pincel',
+    size: 'Tamanho',
+    softness: 'Suavidade',
+    opacity: 'Opacidade',
+    color: 'Cor',
+    colorHint: 'A área sobe ou desce até o topo da faixa desse filamento',
+    blend: 'Mistura',
+    blends: {
+      normal: 'Normal',
+      sampled: 'Cor do centro',
+      onLight: 'Só nas claras',
+      onDark: 'Só nas escuras',
+      raise: 'Só elevar',
+      lower: 'Só rebaixar',
+    },
+    blendHints: {
+      normal: 'Leva toda a área até a cor escolhida',
+      sampled: 'Só pinta onde a cor é parecida com a que estava no centro do pincel ao começar o traço',
+      onLight: 'Só pinta sobre cores mais claras que a do pincel (como Escurecer no Photoshop)',
+      onDark: 'Só pinta sobre cores mais escuras que a do pincel (como Clarear no Photoshop)',
+      raise: 'Só pinta onde está abaixo da cor: o que já está mais alto fica intacto',
+      lower: 'Só pinta onde está acima da cor: o que já está mais baixo fica intacto',
+    },
+    tolerance: 'Tolerância',
+    toleranceHints: {
+      sampled: 'Quanto a cor pode diferir da amostrada e ainda receber tinta. 0% = só a mesma cor',
+      onLight: 'Quanto mais clara que a cor do pincel a área precisa ser para receber tinta. Suba para poupar tons próximos',
+      onDark: 'Quanto mais escura que a cor do pincel a área precisa ser para receber tinta. Suba para poupar tons próximos',
+    },
+    erase: 'Borracha',
+    clear: 'Limpar pintura',
+  },
+
   status: {
     size: (w: string, h: string, z: string) => `${w} × ${h} × ${z} mm`,
     layers: (n: number) => `${n} camadas`,

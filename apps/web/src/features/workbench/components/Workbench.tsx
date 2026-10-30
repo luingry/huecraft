@@ -29,6 +29,8 @@ export function Workbench() {
 
   const wbRef = useRef(wb);
   wbRef.current = wb;
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -53,6 +55,16 @@ export function Workbench() {
         e.preventDefault();
       } else if (!mod && !e.altKey && !isTyping(e.target) && /^[1-5]$/.test(e.key)) {
         setTab(STAGE_TABS[Number(e.key) - 1]);
+      } else if (!mod && !e.altKey && !isTyping(e.target) && key === 'b' && !e.repeat) {
+        // The brush paints on the 3D view: turning it on from another tab goes there.
+        if (tabRef.current !== '3d') {
+          setTab('3d');
+          w.setBrushActive(true);
+        } else {
+          w.setBrushActive(!w.brushActive);
+        }
+      } else if (key === 'escape' && w.brushActive && !isTyping(e.target)) {
+        w.setBrushActive(false);
       }
     };
     // Ctrl+V with an image on the clipboard (screenshot, copied image or file).

@@ -65,6 +65,45 @@ export interface ExportParams {
 
 export type ProfileMode = 'basic' | 'advanced';
 
+export type PaintBlend = 'normal' | 'raise' | 'lower' | 'onLight' | 'onDark' | 'sampled';
+
+/**
+ * One brush stroke painted on the 3D view. Painting a filament pushes the
+ * relief of the area to the top layer of that filament's band, so the colour
+ * shows up in the print (heights are the only thing a layer swap can change).
+ */
+export interface PaintStroke {
+  id: string;
+  mode: 'paint' | 'erase';
+  /**
+   * How paint meets the surface: 'normal' pulls every column to the target,
+   * 'raise' / 'lower' only touch columns below / above it, 'onLight' / 'onDark'
+   * only colours lighter / darker than the brush colour (Photoshop's Darken /
+   * Lighten), 'sampled' only colours close to `sampleLayer`. Missing = 'normal'.
+   */
+  blend?: PaintBlend;
+  /** 'sampled': layer count under the brush centre when the stroke began. */
+  sampleLayer?: number;
+  /**
+   * Colour blends, 0..1. 'sampled': max colour distance still painted (default 0.15).
+   * 'onLight' / 'onDark': how much lighter / darker than the brush colour (in
+   * luminance) a colour must be to be painted (default 0).
+   */
+  tolerance?: number;
+  /** Filament painted; the target layer follows its band when swaps move. */
+  slotId: string;
+  /** Layer count the area reaches, as resolved when painted (fallback if the slot is gone). */
+  layer: number;
+  /** Brush radius as a fraction of the model width. */
+  radius: number;
+  /** 0 = hard edge, 1 = fully feathered. */
+  softness: number;
+  /** 0..1, applied once per stroke (overlapping dabs do not build up). */
+  opacity: number;
+  /** Flattened u, v pairs in image space (0..1, v down). */
+  points: number[];
+}
+
 export interface HueCraftProject {
   schemaVersion: 2;
   id: string;
@@ -75,6 +114,8 @@ export interface HueCraftProject {
   print: PrintParams;
   stack: StackEntry[];
   export: ExportParams;
+  /** Brush strokes painted over the relief, oldest first. */
+  paint?: PaintStroke[];
   imageWidth?: number;
   imageHeight?: number;
 }
@@ -155,6 +196,7 @@ export function validateProject(data: unknown): HueCraftProject {
     print: { ...DEFAULT_PRINT, ...v2.print },
     export: { ...v2.export, swapCommand: v2.export?.swapCommand ?? 'pause' },
     stack: Array.isArray(v2.stack) ? v2.stack : [],
+    paint: Array.isArray(v2.paint) ? v2.paint : [],
   };
 }
 

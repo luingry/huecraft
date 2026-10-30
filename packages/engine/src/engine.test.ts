@@ -9,6 +9,8 @@ import {
   type StackEntry,
 } from '@huecraft/project-schema';
 import { checkWatertight, signedVolume } from '@huecraft/mesh';
+import { paintTargetLayer, resolvePaintLayers } from './index.js';
+import type { PaintStroke } from '@huecraft/project-schema';
 import { autoDistributeStack, computeSwaps, EngineCore, formatSwapPlan, normalizeStack, runExport, runPreview } from './index.js';
 import { LatestWinsQueue, isAbortError } from './scheduler.js';
 import type { PreviewParams, SourceImage } from './protocol.js';
@@ -37,6 +39,108 @@ const stack: StackEntry[] = [entry('a', 0, '#000000', 0.5), entry('b', 8, '#ff00
 function previewParams(over: Partial<PreviewParams> = {}): PreviewParams {
   return { relief: DEFAULT_RELIEF, print, stack, maxEdge: 64, simulateLineWidth: false, ...over };
 }
+
+describe('brush paint', () => {
+  const image = gradient(120, 80);
+  const dot = (over: Partial<PaintStroke> = {}): PaintStroke => ({
+    id: 's1',
+    mode: 'paint',
+    slotId: 'b',
+    layer: 12,
+    radius: 0.1,
+    softness: 0,
+    opacity: 1,
+    points: [0.25, 0.5],
+    ...over,
+  });
+  const at = (r: { width: number; height: number; layerField: Uint16Array }, u: number, v: number) =>
+    r.layerField[Math.floor(v * r.height) * r.width + Math.floor(u * r.width)];
+
+  it('targets the top of the filament band and follows swaps', () => {
+    expect(paintTargetLayer(stack, 'a', 20)).toBe(8);
+    expect(paintTargetLayer(stack, 'b', 20)).toBe(12);
+    expect(paintTargetLayer(stack, 'c', 20)).toBe(20);
+    expect(paintTargetLayer(stack, 'gone', 20)).toBeNull();
+    const moved = stack.map((e) => (e.slotId === 'c' ? { ...e, startLayer: 15 } : e));
+    expect(resolvePaintLayers([dot()], moved, 20)[0].layer).toBe(15);
+  });
+
+  it('raises a full-opacity dab exactly to the target layer, leaving the rest alone', () => {
+    const plain = runPreview(image, previewParams());
+    const r = runPreview(image, previewParams({ paint: [dot()] }));
+    expect(at(r, 0.25, 0.5)).toBe(12);
+    expect(at(r, 0.9, 0.5)).toBe(at(plain, 0.9, 0.5));
+  });
+
+  it('blends with partial opacity and erasing restores the relief', () => {
+    const plain = runPreview(image, previewParams());
+    const half = runPreview(image, previewParams({ paint: [dot({ layer: totalLayerCount(print), opacity: 0.5, points: [0.1, 0.5] })] }));
+    const before = at(plain, 0.1, 0.5);
+    const mid = at(half, 0.1, 0.5);
+    expect(mid).toBeGreaterThan(before);
+    expect(mid).toBeLessThan(totalLayerCount(print));
+    const erased = runPreview(image, previewParams({ paint: [dot(), dot({ id: 's2', mode: 'erase', radius: 0.2 })] }));
+    expect(Array.from(erased.layerField)).toEqual(Array.from(plain.layerField));
+  });
+
+  it('raise / lower blends only touch columns on the other side of the target', () => {
+    const plain = runPreview(image, previewParams());
+    const wide = { radius: 2, points: [0.5, 0.5] };
+    const raised = runPreview(image, previewParams({ paint: [dot({ ...wide, blend: 'raise' })] }));
+    const lowered = runPreview(image, previewParams({ paint: [dot({ ...wide, blend: 'lower' })] }));
+    for (let i = 0; i < plain.layerField.length; i++) {
+      expect(raised.layerField[i]).toBe(Math.max(plain.layerField[i], 12));
+      expect(lowered.layerField[i]).toBe(Math.min(plain.layerField[i], 12));
+    }
+  });
+
+  it('colour blends only paint lighter, darker or sampled colours', () => {
+    const plain = runPreview(image, previewParams());
+    const lut = plain.printedLut;
+    const lum = (n: number) => 0.2126 * lut[n * 3] + 0.7152 * lut[n * 3 + 1] + 0.0722 * lut[n * 3 + 2];
+    const wide = { radius: 2, points: [0.5, 0.5] };
+    // Brush colour = layer 12 (band of 'b').
+    const onLight = runPreview(image, previewParams({ paint: [dot({ ...wide, blend: 'onLight' })] }));
+    const onDark = runPreview(image, previewParams({ paint: [dot({ ...wide, blend: 'onDark' })] }));
+    for (let i = 0; i < plain.layerField.length; i++) {
+      const n = plain.layerField[i];
+      expect(onLight.layerField[i]).toBe(lum(n) > lum(12) ? 12 : n);
+      expect(onDark.layerField[i]).toBe(lum(n) < lum(12) ? 12 : n);
+    }
+    // Tolerance on onLight: only colours at least that much lighter than the brush.
+    const margin = runPreview(image, previewParams({ paint: [dot({ ...wide, blend: 'onLight', tolerance: 0.2 })] }));
+    for (let i = 0; i < plain.layerField.length; i++) {
+      const n = plain.layerField[i];
+      expect(margin.layerField[i]).toBe(lum(n) - lum(12) > 0.2 * 255 ? 12 : n);
+    }
+    // Sampled with zero tolerance: only columns with exactly the sampled colour change.
+    const sampled = runPreview(image, previewParams({ paint: [dot({ ...wide, layer: 19, blend: 'sampled', sampleLayer: 6, tolerance: 0 })] }));
+    for (let i = 0; i < plain.layerField.length; i++) {
+      const n = plain.layerField[i];
+      const same = lut[n * 3] === lut[18] && lut[n * 3 + 1] === lut[19] && lut[n * 3 + 2] === lut[20];
+      expect(sampled.layerField[i]).toBe(same ? 19 : n);
+    }
+    expect(Array.from(sampled.layerField)).not.toEqual(Array.from(plain.layerField));
+  });
+
+  it('cached incremental painting matches a fresh run', () => {
+    const core = new EngineCore();
+    core.setImage(image);
+    const a = dot({ points: [0.2, 0.2, 0.6, 0.6] });
+    const b = dot({ id: 's2', slotId: 'c', layer: 20, points: [0.6, 0.2, 0.2, 0.6] });
+    core.preview(previewParams({ paint: [a] }));
+    core.preview(previewParams({ paint: [a, { ...b, points: b.points.slice(0, 2) }] }));
+    const cached = core.preview(previewParams({ paint: [a, b] }));
+    const fresh = runPreview(image, previewParams({ paint: [a, b] }));
+    expect(Array.from(cached.layerField)).toEqual(Array.from(fresh.layerField));
+  });
+
+  it('exports the painted heights', () => {
+    const r = runExport(image, { name: 'p', relief: DEFAULT_RELIEF, print, stack, swapCommand: 'pause', format: 'stl', paint: [dot()] });
+    const plain = runExport(image, { name: 'p', relief: DEFAULT_RELIEF, print, stack, swapCommand: 'pause', format: 'stl' });
+    expect(r.bytes).not.toEqual(plain.bytes);
+  });
+});
 
 describe('preview', () => {
   const image = gradient(120, 80);

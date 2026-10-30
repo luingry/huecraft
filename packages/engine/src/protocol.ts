@@ -1,4 +1,4 @@
-import type { PrintParams, ReliefParams, StackEntry, SwapCommand } from '@huecraft/project-schema';
+import type { PaintStroke, PrintParams, ReliefParams, StackEntry, SwapCommand } from '@huecraft/project-schema';
 
 /** Source image kept resident inside the worker. Sent once per import. */
 export interface SourceImage {
@@ -15,6 +15,14 @@ export interface PreviewParams {
   maxEdge: number;
   /** Apply the nozzle line-width detail limit to the slicer preview. */
   simulateLineWidth: boolean;
+  /** Brush strokes with their target layer already resolved (see resolvePaintLayers). */
+  paint?: PaintStroke[];
+  /**
+   * Stack whose colours colour-aware blends compare against. Defaults to
+   * `stack`; the app passes the full stack so hiding a colour in the preview
+   * does not change where the paint lands (exports never hide colours).
+   */
+  paintStack?: StackEntry[];
 }
 
 export interface SwapInfo {
@@ -67,6 +75,8 @@ export interface ExportRequestParams {
   stack: StackEntry[];
   swapCommand: SwapCommand;
   format: '3mf' | 'stl';
+  /** Brush strokes with their target layer already resolved (see resolvePaintLayers). */
+  paint?: PaintStroke[];
   /**
    * Optional (additive): bytes of any project 3MF saved by the user's own Bambu
    * Studio or OrcaSlicer. Its printer/process/filament configuration is copied

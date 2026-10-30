@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { autoDistributeStack, type PreviewParams, type PreviewResult, type SwapInfo } from '@huecraft/engine';
+import { autoDistributeStack, resolvePaintLayers, type PreviewParams, type PreviewResult, type SwapInfo } from '@huecraft/engine';
 import { listFilaments, upsertFilament, type FilamentRecord } from '@huecraft/filament-db';
 import {
   createEmptyProject,
   totalLayerCount,
   type HueCraftProject,
+  type PaintBlend,
+  type PaintStroke,
   type PrintParams,
   type ReliefParams,
   type StackEntry,
@@ -28,7 +30,7 @@ import {
 } from '../project/storage';
 import { readSlicerProjectTemplate } from '@huecraft/exporters';
 import { useHistory } from '../project/useHistory';
-import { createSlot, normalizeStack } from './stack';
+import { createSlot, normalizeStack, sortStack } from './stack';
 import { useEngine } from './useEngine';
 
 export type ProfileMode = 'basic' | 'advanced';
@@ -41,6 +43,51 @@ export interface Toast {
 }
 
 const PREVIEW_MAX_EDGE = 640;
+export interface BrushSettings {
+  /** Diameter in mm on the model. */
+  sizeMm: number;
+  /** 0..1, 0 = hard edge. */
+  softness: number;
+  /** 0..1 */
+  opacity: number;
+  erase: boolean;
+  blend: PaintBlend;
+  /** Tolerance per colour blend, 0..1 (see PaintStroke.tolerance). */
+  tolerances: Record<ColorBlend, number>;
+  /** Filament painted; null = the top filament. */
+  slotId: string | null;
+}
+
+/** Blends that compare colours and take a tolerance. */
+export type ColorBlend = 'sampled' | 'onLight' | 'onDark';
+
+export function isColorBlend(b: PaintBlend): b is ColorBlend {
+  return b === 'sampled' || b === 'onLight' || b === 'onDark';
+}
+
+const DEFAULT_BRUSH: BrushSettings = {
+  sizeMm: 6,
+  softness: 0.5,
+  opacity: 1,
+  erase: false,
+  blend: 'normal',
+  tolerances: { sampled: 0.15, onLight: 0, onDark: 0 },
+  slotId: null,
+};
+
+function readBrush(): BrushSettings {
+  try {
+    const { tolerance, ...saved } = JSON.parse(readPref('huecraft:brush') ?? '{}') as Partial<BrushSettings> & {
+      tolerance?: number;
+    };
+    const tolerances = { ...DEFAULT_BRUSH.tolerances, ...saved.tolerances };
+    // Earlier builds kept a single tolerance for the sampled blend.
+    if (typeof tolerance === 'number' && !saved.tolerances) tolerances.sampled = tolerance;
+    return { ...DEFAULT_BRUSH, ...saved, tolerances, erase: false };
+  } catch {
+    return DEFAULT_BRUSH;
+  }
+}
 
 function newProject(name?: string): HueCraftProject {
   const p = createEmptyProject(name ?? t.untitled);
@@ -115,6 +162,10 @@ export function useWorkbench() {
   const [slicerTemplate, setSlicerTemplateState] = useState<SlicerTemplate | null>(null);
   // Preview-only: slots hidden here are skipped by the preview, never by exports.
   const [hiddenSlots, setHiddenSlots] = useState<string[]>([]);
+  const [brushActive, setBrushActive] = useState(false);
+  const [brush, setBrushState] = useState<BrushSettings>(readBrush);
+  // Stroke being drawn: previewed live, committed to the project (one undo step) on release.
+  const [liveStroke, setLiveStroke] = useState<PaintStroke | null>(null);
   const autoDistributePending = useRef(false);
   const booted = useRef(false);
 
@@ -188,6 +239,13 @@ export function useWorkbench() {
   // A different project has different slots.
   useEffect(() => setHiddenSlots([]), [project.id]);
 
+  // Strokes follow their filament's band; resolved against the full stack so
+  // hiding a colour in the preview does not move the paint.
+  const resolvedPaint = useMemo(
+    () => resolvePaintLayers(project.paint, project.stack, totalLayers),
+    [project.paint, project.stack, totalLayers],
+  );
+
   const previewParams = useMemo<PreviewParams | null>(
     () =>
       visibleStack.length > 0
@@ -197,9 +255,11 @@ export function useWorkbench() {
             stack: visibleStack,
             maxEdge: PREVIEW_MAX_EDGE,
             simulateLineWidth,
+            paint: liveStroke ? [...resolvedPaint, ...resolvePaintLayers([liveStroke], project.stack, totalLayers)] : resolvedPaint,
+            paintStack: project.stack,
           }
         : null,
-    [project.relief, project.print, visibleStack, simulateLineWidth],
+    [project.relief, project.print, visibleStack, simulateLineWidth, resolvedPaint, liveStroke, project.stack, totalLayers],
   );
 
   const engine = useEngine(image?.source ?? null, previewParams);
@@ -269,6 +329,61 @@ export function useWorkbench() {
     [setProject],
   );
 
+  /* ---------- brush ---------- */
+
+  const setBrush = useCallback((patch: Partial<BrushSettings>) => {
+    setBrushState((b) => {
+      const next = { ...b, ...patch };
+      writePref('huecraft:brush', JSON.stringify({ ...next, erase: false }));
+      return next;
+    });
+  }, []);
+
+  /** Filament the brush paints: the chosen one, or the top filament. */
+  const brushSlot = useMemo(() => {
+    const sorted = sortStack(project.stack);
+    return sorted.find((e) => e.slotId === brush.slotId) ?? sorted[sorted.length - 1] ?? null;
+  }, [project.stack, brush.slotId]);
+
+  /** Builds a stroke from the current brush settings for the given points. */
+  const makeStroke = useCallback(
+    (id: string, points: number[], sampleLayer: number): PaintStroke | null => {
+      if (!brushSlot && !brush.erase) return null;
+      return {
+        id,
+        mode: brush.erase ? 'erase' : 'paint',
+        blend: brush.blend,
+        slotId: brushSlot?.slotId ?? '',
+        layer: totalLayers,
+        radius: brush.sizeMm / 2 / project.print.widthMm,
+        softness: brush.softness,
+        opacity: brush.opacity,
+        ...(brush.blend === 'sampled' ? { sampleLayer } : {}),
+        ...(isColorBlend(brush.blend) ? { tolerance: brush.tolerances[brush.blend] } : {}),
+        points,
+      };
+    },
+    [brushSlot, brush, totalLayers, project.print.widthMm],
+  );
+
+  const paintStroke = useCallback(
+    (id: string, points: number[], done: boolean, sampleLayer: number) => {
+      const stroke = makeStroke(id, points, sampleLayer);
+      if (!done) {
+        setLiveStroke(stroke);
+        return;
+      }
+      setLiveStroke(null);
+      if (stroke) setProject((p) => ({ ...p, paint: [...(p.paint ?? []), stroke] }));
+    },
+    [makeStroke, setProject],
+  );
+
+  const clearPaint = useCallback(
+    () => setProject((p) => ((p.paint?.length ?? 0) === 0 ? p : { ...p, paint: [] })),
+    [setProject],
+  );
+
   const autoDistribute = useCallback(() => {
     if (!result) return;
     updateStack(
@@ -296,6 +411,8 @@ export function useWorkbench() {
           imageWidth: loaded.source.width,
           imageHeight: loaded.source.height,
           stack: project.stack.length > 0 ? project.stack : defaultStack(library),
+          // Paint belongs to the old image.
+          paint: [],
         });
         setImage((prev) => {
           prev?.bitmap.close();
@@ -369,6 +486,7 @@ export function useWorkbench() {
           stack: project.stack,
           swapCommand: project.export.swapCommand,
           format: kind,
+          paint: resolvedPaint,
           slicerTemplate: kind === '3mf' ? slicerTemplate?.bytes : undefined,
         });
         const fileName = `${base}.${kind}`;
@@ -383,7 +501,7 @@ export function useWorkbench() {
         setExporting(false);
       }
     },
-    [image, result, project, engine.client, slicerTemplate, showToast],
+    [image, result, project, engine.client, slicerTemplate, showToast, resolvedPaint],
   );
 
   const chooseSlicerTemplate = useCallback(
@@ -437,6 +555,13 @@ export function useWorkbench() {
     rename,
     setSwapCommand,
     autoDistribute,
+    brushActive,
+    setBrushActive,
+    brush,
+    setBrush,
+    brushSlot,
+    paintStroke,
+    clearPaint,
     openImageFile,
     newBlankProject,
     openProject,

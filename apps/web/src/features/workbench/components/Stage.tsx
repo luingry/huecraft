@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSPrope
 import { filamentIndexAtLayer, layerTopZ } from '@huecraft/project-schema';
 import {
   Button,
+  IconBrush,
   IconCompare,
   IconCube,
   IconImage,
@@ -14,6 +15,7 @@ import { formatMm, t } from '../../../i18n';
 import { readPref, writePref } from '../../project/storage';
 import { sortStack } from '../stack';
 import type { Workbench } from '../useWorkbench';
+import { BrushMenu } from './BrushMenu';
 import { BitmapCanvas, IDENTITY, ImageViewport, RgbaCanvas, type ViewTransform } from './ImageViewport';
 import type { MeshColorMode } from './MeshView';
 
@@ -45,7 +47,10 @@ export function Stage({
   const [layerCut, setLayerCut] = useState<number | null>(null);
   const [resetToken, setResetToken] = useState(0);
   const [split, setSplit] = useState(0.5);
+  const [brushMenu, setBrushMenu] = useState<{ x: number; y: number } | null>(null);
+  const closeBrushMenu = useCallback(() => setBrushMenu(null), []);
   const res = wb.result;
+  const brushOn = wb.brushActive && tab === '3d';
 
   const setBackdrop = (b: Backdrop) => {
     setBackdropState(b);
@@ -109,6 +114,23 @@ export function Stage({
                 { value: 'slicer', label: t.stage.slicer },
               ]}
             />
+            <Button
+              size="sm"
+              variant="ghost"
+              className="wb-brush-btn"
+              aria-pressed={wb.brushActive}
+              title={t.brush.toggleHint}
+              onClick={() => wb.setBrushActive(!wb.brushActive)}
+            >
+              <IconBrush size={14} />
+              {t.brush.toggle}
+              {wb.brushActive && (
+                <span
+                  className="wb-swatch wb-swatch--xs"
+                  style={{ background: wb.brush.erase ? 'transparent' : wb.brushSlot?.filament.colorHex, outline: wb.brush.erase ? '1px dashed #ff6b6b' : undefined }}
+                />
+              )}
+            </Button>
             <Button size="sm" variant="ghost" onClick={() => setResetToken((n) => n + 1)}>
               {t.stage.resetView}
             </Button>
@@ -140,10 +162,25 @@ export function Stage({
                 colorMode={meshColors}
                 cutLayers={cut}
                 maxLayerZ={layerTopZ(wb.project.print, cut - 1)}
+                layerZ={(i) => layerTopZ(wb.project.print, i)}
                 background={background}
                 resetToken={resetToken}
+                brush={
+                  brushOn
+                    ? {
+                        sizeMm: wb.brush.sizeMm,
+                        softness: wb.brush.softness,
+                        colorHex: wb.brushSlot?.filament.colorHex ?? '#ffffff',
+                        erase: wb.brush.erase,
+                      }
+                    : null
+                }
+                onStroke={wb.paintStroke}
+                onBrushMenu={(x, y) => setBrushMenu({ x, y })}
               />
             </Suspense>
+            {brushOn && <div className="wb-brush-hint">{t.brush.hint}</div>}
+            {brushOn && brushMenu && <BrushMenu wb={wb} x={brushMenu.x} y={brushMenu.y} onClose={closeBrushMenu} />}
             <LayerScrubber total={total} value={cut} onChange={(v) => setLayerCut(v >= total ? null : v)} />
           </>
         ) : tab === 'original' ? (
