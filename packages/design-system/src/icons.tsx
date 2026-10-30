@@ -1,4 +1,4 @@
-import type { ReactNode, SVGProps } from 'react';
+import { useId, type ReactNode, type SVGProps } from 'react';
 
 type IconProps = SVGProps<SVGSVGElement> & { size?: number };
 
@@ -134,3 +134,26 @@ export const IconEyeOff = make(
     <path d="m3 3 18 18" />
   </>,
 );
+
+/** Brand mark: a print's colour strata rising into a hill under a light source. Mirrors apps/web/public/favicon.svg. */
+export function LogoMark({ size = 24, ...props }: IconProps) {
+  const clip = useId();
+  return (
+    <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden {...props}>
+      <defs>
+        <clipPath id={clip}>
+          <path d="M4 26 C7 26 9.5 15.5 13.5 13 C16 11.4 17.2 7 20 7 C23.2 7 24.2 17.5 26 22.5 C26.8 24.8 27.4 26 28.5 26 Z" />
+        </clipPath>
+      </defs>
+      <rect width="32" height="32" rx="8" fill="#1b1b1b" />
+      <rect x="0.5" y="0.5" width="31" height="31" rx="7.5" fill="none" stroke="#fff" strokeOpacity={0.1} />
+      <circle cx="9.5" cy="9" r="2.4" fill="#ececec" />
+      <g clipPath={`url(#${clip})`}>
+        <rect y="21.4" width="32" height="10" fill="#3d2c52" />
+        <rect y="16.8" width="32" height="4" fill="#8e3b5a" />
+        <rect y="12.2" width="32" height="4" fill="#d9643f" />
+        <rect width="32" height="11.6" fill="#f2b65e" />
+      </g>
+    </svg>
+  );
+}

@@ -11,6 +11,7 @@ import {
   IconPlus,
   IconRedo,
   IconUndo,
+  LogoMark,
   Menu,
   MenuItem,
   Segmented,
@@ -26,7 +27,7 @@ export function TopBar({ wb, onPickImage }: { wb: Workbench; onPickImage: () => 
   return (
     <header className="wb-topbar">
       <div className="wb-brand">
-        <span className="wb-brand__mark" aria-hidden />
+        <LogoMark size={24} className="wb-brand__mark" />
         <span className="wb-brand__name">{t.appName}</span>
       </div>
 
