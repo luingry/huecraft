@@ -10,7 +10,7 @@
     "build": "pnpm -r build",
     "test": "vitest run",
     "lint": "pnpm -r lint",
-    "bench": "pnpm --filter @huecraft/engine build && node packages/engine/dist/bench.js"
+    "bench": "pnpm --filter @huecraft/engine bench"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

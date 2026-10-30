@@ -65,7 +65,37 @@ export const STARTER_FILAMENTS: FilamentRecord[] = [
     tdMm: 1.8,
     source: 'builtin',
   },
+  ...bambuBasic([
+    ['black', 'Black', '#000000', 0.6],
+    ['jade-white', 'Jade White', '#ffffff', 3.6],
+    ['light-gray', 'Light Gray', '#d1d3d5', 2.8],
+    ['gray', 'Gray', '#8e9089', 1.6],
+    ['red', 'Red', '#c12e1f', 2.6],
+    ['orange', 'Orange', '#ff6a13', 3.2],
+    ['yellow', 'Yellow', '#f4ee2a', 4.5],
+    ['beige', 'Beige', '#f7e6de', 3.4],
+    ['cyan', 'Cyan', '#0086d6', 2.2],
+    ['blue', 'Blue', '#0a2989', 1.4],
+    ['magenta', 'Magenta', '#ec008c', 2.4],
+  ]),
 ];
+
+/** Bambu Lab PLA Basic starters. TD values are approximate community measurements; calibrate your own spools. */
+function bambuBasic(rows: Array<[string, string, string, number]>): FilamentRecord[] {
+  return rows.map(([id, color, hex, td]) => {
+    const { r, g, b } = hexToRgb(hex);
+    return {
+      id: `builtin-bambu-pla-basic-${id}`,
+      name: `PLA Basic ${color}`,
+      brand: 'Bambu Lab',
+      colorHex: hex,
+      lab: rgbToLab(r, g, b),
+      tdMm: td,
+      notes: 'Approximate TD (community value), calibrate for best results.',
+      source: 'builtin',
+    };
+  });
+}
 
 export function hexToRgb(hex: string): { r: number; g: number; b: number } {
   const h = hex.replace('#', '');

@@ -1,0 +1,318 @@
+import {
+  baseLayerCount,
+  layerTopZ,
+  totalLayerCount,
+  type PrintParams,
+  type ReliefParams,
+} from '@huecraft/project-schema';
+import {
+  exportGridSize,
+  extractLumaAlpha,
+  previewGridSize,
+  reliefField,
+  resizeLumaAlpha,
+  type GridSize,
+  type LumaAlpha,
+} from '@huecraft/image-core';
+import {
+  buildPrintedLut,
+  buildSlicerLut,
+  computeLayerField,
+  computeLineLimitedLayerField,
+  heightForRelief,
+  layerFieldToRgba,
+  layerHistogram,
+  type LayerModel,
+} from '@huecraft/optics';
+import { buildSolidHeightfieldMesh, buildTerracedMesh } from '@huecraft/mesh';
+import { export3mf, exportBinaryStl, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
+import type { ExportRequestParams, ExportResult, PreviewParams, PreviewResult, SourceImage } from './protocol.js';
+import { computeSwaps, FALLBACK_FILAMENT, formatSwapPlan, layerFilaments, normalizeStack } from './stack.js';
+
+/** Layer geometry derived from print params (validated). */
+export function layerModelFor(print: PrintParams): LayerModel {
+  if (!(print.layerHeightMm > 0) || !(print.firstLayerHeightMm > 0)) throw new Error('Layer heights must be positive');
+  if (!(print.maxHeightMm > print.baseThicknessMm)) throw new Error('Max height must exceed the base thickness');
+  const totalLayers = Math.max(1, totalLayerCount(print));
+  const baseLayers = Math.max(1, Math.min(totalLayers, baseLayerCount(print)));
+  return {
+    firstLayerHeightMm: print.firstLayerHeightMm,
+    layerHeightMm: print.layerHeightMm,
+    baseThicknessMm: print.baseThicknessMm,
+    maxHeightMm: print.maxHeightMm,
+    baseLayers,
+    totalLayers,
+  };
+}
+
+/** z of the plateau of a column with n layers (index n, 0 for n = 0). */
+export function plateauZ(print: PrintParams, totalLayers: number): Float32Array {
+  const z = new Float32Array(totalLayers + 1);
+  for (let n = 1; n <= totalLayers; n++) z[n] = layerTopZ(print, n - 1);
+  return z;
+}
+
+/** Physical size: width is fixed by the user, height follows the source aspect. */
+export function physicalSize(image: { width: number; height: number }, print: PrintParams): { width: number; height: number } {
+  if (!(print.widthMm > 0)) throw new Error('Width must be positive');
+  return { width: print.widthMm, height: (print.widthMm * image.height) / image.width };
+}
+
+class Lru<V> {
+  private map = new Map<string, V>();
+  constructor(private limit: number) {}
+  get(key: string): V | undefined {
+    const v = this.map.get(key);
+    if (v !== undefined) {
+      this.map.delete(key);
+      this.map.set(key, v);
+    }
+    return v;
+  }
+  set(key: string, v: V): void {
+    this.map.delete(key);
+    this.map.set(key, v);
+    while (this.map.size > this.limit) this.map.delete(this.map.keys().next().value as string);
+  }
+  clear(): void {
+    this.map.clear();
+  }
+}
+
+function reliefKey(size: GridSize, r: ReliefParams): string {
+  return `${size.width}x${size.height}|${r.brightness}|${r.contrast}|${r.gamma}|${r.invert ? 1 : 0}|${r.smoothing}`;
+}
+
+function safeFileName(name: string): string {
+  const s = (name ?? '').replace(/[^\p{L}\p{N}\-_ .]+/gu, '_').replace(/\s+/g, ' ').trim().replace(/^\.+/, '');
+  return s.slice(0, 80) || 'huecraft';
+}
+
+/**
+ * Stateful pipeline with caches, used by the worker and by the pure helpers.
+ * Caches: the source (as luma/alpha), downscales per grid size, and relief
+ * fields per (grid size, relief params). Moving stack handles or changing
+ * print params never re-runs the resize or the relief transfer.
+ */
+export class EngineCore {
+  private source: LumaAlpha | null = null;
+  private grids = new Lru<LumaAlpha>(3);
+  private reliefs = new Lru<Float32Array>(4);
+
+  setImage(image: SourceImage): void {
+    if (!(image.width > 0 && image.height > 0) || image.rgba.length < image.width * image.height * 4) {
+      throw new Error('Invalid image');
+    }
+    this.source = extractLumaAlpha(image);
+    this.grids.clear();
+    this.reliefs.clear();
+  }
+
+  get hasImage(): boolean {
+    return this.source !== null;
+  }
+
+  private requireSource(): LumaAlpha {
+    if (!this.source) throw new Error('No image loaded');
+    return this.source;
+  }
+
+  private grid(size: GridSize): LumaAlpha {
+    const key = `${size.width}x${size.height}`;
+    let g = this.grids.get(key);
+    if (!g) {
+      g = resizeLumaAlpha(this.requireSource(), size);
+      this.grids.set(key, g);
+    }
+    return g;
+  }
+
+  private relief(size: GridSize, relief: ReliefParams): Float32Array {
+    const key = reliefKey(size, relief);
+    let t = this.reliefs.get(key);
+    if (!t) {
+      t = reliefField(this.grid(size), relief);
+      this.reliefs.set(key, t);
+    }
+    return t;
+  }
+
+  preview(params: PreviewParams): PreviewResult {
+    const t0 = performance.now();
+    const src = this.requireSource();
+    const { print } = params;
+    const model = layerModelFor(print);
+    const size = physicalSize(src, print);
+    const grid = previewGridSize(src.width, src.height, params.maxEdge);
+    this.grid(grid);
+    const t1 = performance.now();
+    const t = this.relief(grid, params.relief);
+    const t2 = performance.now();
+
+    const full = computeLayerField(t, model);
+    const layerHist = layerHistogram(full, model.totalLayers);
+    // Line-width limit: applied to every view (both colour maps and the 3D mesh)
+    // so they agree with each other and with what the slicer can print. The
+    // histogram stays on the full-resolution field so stack auto-distribution
+    // does not jump when the toggle changes.
+    const pitch = size.width / grid.width;
+    let field = full;
+    if (params.simulateLineWidth && print.lineWidthMm > pitch) {
+      const factor = Math.round(print.lineWidthMm / pitch);
+      if (factor > 1) field = computeLineLimitedLayerField(t, grid.width, grid.height, factor, model);
+    }
+    const t3 = performance.now();
+
+    const stack = normalizeStack(params.stack);
+    const layers = layerFilaments(stack, model.totalLayers);
+    const thickness = (k: number) => (k === 0 ? print.firstLayerHeightMm : print.layerHeightMm);
+    const printedLut = buildPrintedLut(layers, thickness);
+    const slicerLut = buildSlicerLut(layers);
+    const printedRgba = layerFieldToRgba(field, printedLut);
+    const slicerRgba = layerFieldToRgba(field, slicerLut);
+    const t4 = performance.now();
+
+    const zOfCount = plateauZ(print, model.totalLayers);
+    const mesh = buildTerracedMesh({
+      field,
+      width: grid.width,
+      height: grid.height,
+      widthMm: size.width,
+      heightMm: size.height,
+      zOfCount,
+      printedLut,
+      slicerLut,
+    });
+    const t5 = performance.now();
+
+    let maxN = 0;
+    for (let i = 0; i < field.length; i++) if (field[i] > maxN) maxN = field[i];
+    return {
+      width: grid.width,
+      height: grid.height,
+      printedRgba,
+      slicerRgba,
+      layerField: field,
+      layerHistogram: layerHist,
+      printedLut,
+      slicerLut,
+      totalLayers: model.totalLayers,
+      baseLayers: model.baseLayers,
+      sizeMm: { width: size.width, height: size.height, z: zOfCount[maxN] },
+      swaps: computeSwaps(stack, print, model.totalLayers),
+      mesh: {
+        positions: mesh.positions,
+        indices: mesh.indices,
+        printedColors: mesh.printedColors,
+        slicerColors: mesh.slicerColors,
+        triangleCount: mesh.triangleCount,
+      },
+      timings: {
+        resizeMs: t1 - t0,
+        reliefMs: t2 - t1,
+        layersMs: t3 - t2,
+        colorMs: t4 - t3,
+        meshMs: t5 - t4,
+        totalMs: performance.now() - t0,
+      },
+    };
+  }
+
+  export(params: ExportRequestParams): ExportResult {
+    const t0 = performance.now();
+    const src = this.requireSource();
+    const { print } = params;
+    const model = layerModelFor(print);
+    const size = physicalSize(src, print);
+    const grid = exportGridSize(src.width, src.height, size.width, print.exportResolutionMm);
+    this.grid(grid);
+    const t1 = performance.now();
+    const t = this.relief(grid, params.relief);
+    const t2 = performance.now();
+
+    // Top surface: snapped to the layer top the slicer will print (mid-plane
+    // rule), or the raw relief height.
+    const heights = new Float32Array(t.length);
+    let maxZ = 0;
+    if (print.snapToLayers) {
+      const field = computeLayerField(t, model);
+      const zOfCount = plateauZ(print, model.totalLayers);
+      for (let i = 0; i < t.length; i++) heights[i] = zOfCount[field[i]];
+    } else {
+      for (let i = 0; i < t.length; i++) heights[i] = heightForRelief(t[i], model);
+    }
+    for (let i = 0; i < heights.length; i++) if (heights[i] > maxZ) maxZ = heights[i];
+    const mesh = buildSolidHeightfieldMesh({ heights, width: grid.width, height: grid.height, widthMm: size.width, heightMm: size.height });
+    const t3 = performance.now();
+
+    const stack = normalizeStack(params.stack);
+    const swaps = computeSwaps(stack, print, model.totalLayers);
+    const swapText = formatSwapPlan({
+      name: params.name,
+      print,
+      stack,
+      swaps,
+      swapCommand: params.swapCommand,
+      totalLayers: model.totalLayers,
+      baseLayers: model.baseLayers,
+      sizeMm: { width: size.width, height: size.height, z: maxZ },
+    });
+    const base = safeFileName(params.name);
+    let bytes: Uint8Array;
+    let slicerProject: string | undefined;
+    if (params.format === 'stl') {
+      bytes = new Uint8Array(exportBinaryStl(mesh, params.name));
+    } else {
+      const template = params.slicerTemplate ? readSlicerProjectTemplate(params.slicerTemplate) : null;
+      slicerProject = template?.application;
+      const slicerSwaps: SlicerSwap[] = swaps.map((s) => ({
+        topZMm: s.topZMm,
+        kind: params.swapCommand,
+        colorHex: s.colorHex,
+        message: `Load ${s.filamentName}`,
+      }));
+      bytes = export3mf(mesh, {
+        name: params.name,
+        swaps: slicerSwaps,
+        attachments: { 'Metadata/hueCraft_swap_plan.txt': swapText },
+        template,
+        layerHeightMm: print.layerHeightMm,
+        firstLayerHeightMm: print.firstLayerHeightMm,
+        firstFilamentHex: (stack[0]?.filament ?? FALLBACK_FILAMENT).colorHex,
+        sizeMm: size,
+      });
+    }
+    const t4 = performance.now();
+    return {
+      bytes,
+      fileName: `${base}.${params.format}`,
+      mimeType: params.format === 'stl' ? 'model/stl' : 'model/3mf',
+      triangleCount: mesh.triangleCount,
+      swapText,
+      ...(slicerProject ? { slicerProject } : {}),
+      timings: {
+        resizeMs: t1 - t0,
+        reliefMs: t2 - t1,
+        meshMs: t3 - t2,
+        encodeMs: t4 - t3,
+        totalMs: t4 - t0,
+        gridWidth: grid.width,
+        gridHeight: grid.height,
+      },
+    };
+  }
+}
+
+/** Pure preview: no caching across calls. */
+export function runPreview(image: SourceImage, params: PreviewParams): PreviewResult {
+  const core = new EngineCore();
+  core.setImage(image);
+  return core.preview(params);
+}
+
+/** Pure export: no caching across calls. */
+export function runExport(image: SourceImage, params: ExportRequestParams): ExportResult {
+  const core = new EngineCore();
+  core.setImage(image);
+  return core.export(params);
+}
