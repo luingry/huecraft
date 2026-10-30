@@ -1,5 +1,5 @@
-import { useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { createFilamentFromHex } from '@huecraft/filament-db';
+import { useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
+import { createFilamentFromHex, type FilamentRecord } from '@huecraft/filament-db';
 import { layerTopZ, type StackEntry, type StackFilament } from '@huecraft/project-schema';
 import {
   Button,
@@ -17,11 +17,25 @@ import {
   Segmented,
 } from '@huecraft/design-system';
 import { formatMm, t } from '../../../i18n';
-import { addOnTop, removeSlot, replaceFilament, setStartLayer, moveFilament, sortStack, swapFilaments } from '../stack';
+import {
+  addOnTop,
+  bandRange,
+  filamentKey,
+  filamentsInUse,
+  insertInBand,
+  moveFilament,
+  removeSlot,
+  replaceFilament,
+  setStartLayer,
+  sortStack,
+  swapFilaments,
+  topReachedLayer,
+} from '../stack';
 import type { Workbench } from '../useWorkbench';
 import { FilamentEditor } from './FilamentEditor';
 
-type EditorState = { mode: 'new' } | { mode: 'edit'; slotId: string } | null;
+/** `insertIn`: the band a new filament splits; none = on top. */
+type EditorState = { mode: 'new'; insertIn?: string } | { mode: 'edit'; slotId: string } | null;
 
 export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean }) {
   const [editor, setEditor] = useState<EditorState>(null);
@@ -30,6 +44,19 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
   const stack = sortStack(wb.project.stack);
   const total = wb.totalLayers;
   const print = wb.project.print;
+  const histogram = wb.result?.layerHistogram ?? null;
+  const topLayer = topReachedLayer(histogram, total);
+
+  const addFilament = (f: FilamentRecord | StackFilament, insertIn?: string) =>
+    wb.updateStack((s) => (insertIn ? insertInBand(s, insertIn, f, topLayer) : addOnTop(s, f, topLayer)));
+  const picker = (close: () => void, insertIn?: string) => (
+    <FilamentPicker
+      stack={stack}
+      library={wb.library}
+      onNew={() => (close(), setEditor({ mode: 'new', insertIn }))}
+      onPick={(f) => (close(), addFilament(f, insertIn))}
+    />
+  );
 
   const editing = editor?.mode === 'edit' ? stack.find((e) => e.slotId === editor.slotId) : undefined;
 
@@ -105,7 +132,7 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
       filament = { ...f, libraryId: rec.id };
     }
     if (editor?.mode === 'edit') wb.updateStack((s) => replaceFilament(s, editor.slotId, filament));
-    else wb.updateStack((s) => addOnTop(s, filament, total));
+    else if (editor?.mode === 'new') addFilament(filament, editor.insertIn);
     setEditor(null);
   };
 
@@ -126,28 +153,7 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
               </IconButton>
             )}
           >
-            {(close) => (
-              <div className="wb-library-menu">
-                <MenuItem icon={<IconPlus />} onClick={() => (close(), setEditor({ mode: 'new' }))}>
-                  {t.stack.newFilament}
-                </MenuItem>
-                <div className="hc-menu__sep" />
-                <div className="hc-menu__label">{t.stack.library}</div>
-                {wb.library.map((f) => (
-                  <MenuItem
-                    key={f.id}
-                    icon={<span className="wb-swatch wb-swatch--sm" style={{ background: f.colorHex }} />}
-                    hint={`${f.brand} · ${t.stack.td} ${formatMm(f.tdMm)} mm`}
-                    onClick={() => {
-                      close();
-                      wb.updateStack((s) => addOnTop(s, f, total));
-                    }}
-                  >
-                    {f.name}
-                  </MenuItem>
-                ))}
-              </div>
-            )}
+            {(close) => picker(close)}
           </Menu>
         </>
       }
@@ -159,12 +165,16 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
           <StackBar
             stack={stack}
             total={total}
-            histogram={wb.result?.layerHistogram ?? null}
+            histogram={histogram}
+            topLayer={topLayer}
             baseLayers={wb.result?.baseLayers ?? 1}
             hidden={wb.hiddenSlots}
             hot={hot}
             onHot={setHot}
             onMove={(slotId, layer) => wb.updateStack((s) => setStartLayer(s, slotId, layer, total), `drag:${slotId}`)}
+            addMenu={(slotId, close) => picker(close, slotId)}
+            onSwap={(a, b) => wb.updateStack((s) => swapFilaments(s, a, b))}
+            onMoveTo={(slotId, to) => wb.updateStack((s) => moveFilament(s, slotId, to))}
           />
           <ol className="wb-stack__rows" ref={rowsRef} data-reordering={!!reorder}>
             {reorder?.target?.kind === 'gap' && (
@@ -175,7 +185,8 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
               const dragged = reorder?.from === entry.slotId;
               const spread = dragged ? 0 : spreadOf(displayIndex);
               const isBase = index === 0;
-              const outOfRange = entry.startLayer >= total;
+              // No pixel reaches this layer, so the filament never shows up.
+              const outOfRange = entry.startLayer > topLayer;
               const hidden = wb.hiddenSlots.includes(entry.slotId);
               return (
                 <li
@@ -184,6 +195,7 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
                   data-slot={entry.slotId}
                   data-hot={hot === entry.slotId}
                   data-out={outOfRange}
+                  title={outOfRange ? t.stack.unreachable : undefined}
                   data-hidden={hidden}
                   data-dragging={dragged}
                   data-drop={reorder?.target?.kind === 'swap' && reorder.target.slotId === entry.slotId}
@@ -361,18 +373,28 @@ function StackBar({
   histogram,
   baseLayers,
   hidden,
+  topLayer,
   hot,
   onHot,
   onMove,
+  addMenu,
+  onSwap,
+  onMoveTo,
 }: {
   stack: StackEntry[];
   total: number;
   histogram: Uint32Array | null;
   baseLayers: number;
   hidden: string[];
+  topLayer: number;
   hot: string | null;
   onHot: (slotId: string | null) => void;
   onMove: (slotId: string, layer: number) => void;
+  /** Menu of filaments to split the band of `slotId` with. */
+  addMenu: (slotId: string, close: () => void) => ReactNode;
+  onSwap: (a: string, b: string) => void;
+  /** Move the filament of `slotId` to stack index `toIndex` (base = 0). */
+  onMoveTo: (slotId: string, toIndex: number) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [dragging, setDragging] = useState<string | null>(null);
@@ -387,8 +409,50 @@ function StackBar({
     return Math.round(((rect.bottom - y) / rect.height) * total);
   };
 
+  // Dragging a band by its grip moves its filament, like the rows' grips: over a
+  // band the two filaments swap, on a divider it slots in there. Ranges stay put.
+  type BandTarget = { kind: 'swap'; slotId: string } | { kind: 'gap'; index: number };
+  type BandDrag = { from: string; y: number; target: BandTarget | null };
+  const [bandDrag, setBandDragState] = useState<BandDrag | null>(null);
+  const bandDragRef = useRef<BandDrag | null>(null);
+  const setBandDrag = (d: BandDrag | null) => {
+    bandDragRef.current = d;
+    setBandDragState(d);
+  };
+  const bandTargetAt = (from: string, clientY: number): BandTarget | null => {
+    const rect = ref.current!.getBoundingClientRect();
+    const fromIndex = stack.findIndex((e) => e.slotId === from);
+    const visible = stack.filter((e) => e.startLayer < total);
+    for (let i = 1; i < visible.length; i++) {
+      const y = rect.bottom - (visible[i].startLayer / total) * rect.height;
+      if (Math.abs(clientY - y) <= 5) return i === fromIndex || i === fromIndex + 1 ? null : { kind: 'gap', index: i };
+    }
+    const layer = ((rect.bottom - clientY) / rect.height) * total;
+    let over = visible[0];
+    for (const e of visible) if (e.startLayer <= layer) over = e;
+    return !over || over.slotId === from ? null : { kind: 'swap', slotId: over.slotId };
+  };
+  const bandDragTo = (clientY: number) => {
+    const d = bandDragRef.current;
+    if (!d) return;
+    const top = ref.current!.getBoundingClientRect().top;
+    setBandDrag({ ...d, y: clientY - top, target: bandTargetAt(d.from, clientY) });
+  };
+  const bandDrop = () => {
+    const d = bandDragRef.current;
+    setBandDrag(null);
+    if (!d?.target) return;
+    if (d.target.kind === 'swap') onSwap(d.from, d.target.slotId);
+    else {
+      const from = stack.findIndex((e) => e.slotId === d.from);
+      onMoveTo(d.from, d.target.index > from ? d.target.index - 1 : d.target.index);
+    }
+  };
+  const busy = !!dragging || !!bandDrag;
+  const dragged = bandDrag ? stack.find((e) => e.slotId === bandDrag.from) : undefined;
+
   return (
-    <div className="wb-stackbar" ref={ref} aria-hidden>
+    <div className="wb-stackbar" ref={ref}>
       {stack.map((e, i) => {
         const end = i + 1 < stack.length ? stack[i + 1].startLayer : total;
         if (e.startLayer >= total) return null;
@@ -396,15 +460,23 @@ function StackBar({
           <div
             key={e.slotId}
             className="wb-stackbar__band"
+            aria-hidden
             data-hot={hot === e.slotId}
             data-hidden={hidden.includes(e.slotId)}
+            data-dragging={bandDrag?.from === e.slotId}
+            data-drop={bandDrag?.target?.kind === 'swap' && bandDrag.target.slotId === e.slotId}
             style={{ bottom: pct(e.startLayer), height: `calc(${pct(end)} - ${pct(e.startLayer)})`, background: e.filament.colorHex }}
+            onPointerEnter={() => !busy && onHot(e.slotId)}
+            onPointerLeave={() => !busy && onHot(null)}
           />
         );
       })}
-      <div className="wb-stackbar__base" style={{ height: pct(baseLayers) }} />
+      {bandDrag?.target?.kind === 'gap' && (
+        <span className="wb-stackbar__insert" style={{ bottom: pct(stack[bandDrag.target.index].startLayer) }} aria-hidden />
+      )}
+      <div className="wb-stackbar__base" style={{ height: pct(baseLayers) }} aria-hidden />
       {histogram && (
-        <div className="wb-stackbar__hist">
+        <div className="wb-stackbar__hist" aria-hidden>
           {Array.from({ length: total }, (_, k) => {
             // Pixels whose top layer is k (layer count k + 1).
             const v = histogram[k + 1] ?? 0;
@@ -425,6 +497,7 @@ function StackBar({
           <div
             key={e.slotId}
             className="wb-stackbar__handle"
+            aria-hidden
             data-active={active}
             style={{ bottom: pct(e.startLayer) }}
             onPointerEnter={() => onHot(e.slotId)}
@@ -445,8 +518,129 @@ function StackBar({
           </div>
         );
       })}
-      <span className="wb-stackbar__cap wb-stackbar__cap--top">{total}</span>
-      <span className="wb-stackbar__cap wb-stackbar__cap--bottom">1</span>
+      {stack.map((e, i) => {
+        if (e.startLayer >= total) return null;
+        // Splits only the part of the band the image reaches, so the new colour shows up.
+        const range = bandRange(stack, e.slotId, topLayer);
+        const canSplit = !!range && range.end - range.start >= 2;
+        const end = Math.min(total, i + 1 < stack.length ? stack[i + 1].startLayer : total);
+        const mid = canSplit ? (range.start + range.end) / 2 : (e.startLayer + end) / 2;
+        return (
+          <div
+            key={e.slotId}
+            className="wb-stackbar__add"
+            data-show={!busy && hot === e.slotId}
+            style={{ bottom: pct(mid) }}
+            onPointerEnter={() => !busy && onHot(e.slotId)}
+            onPointerLeave={() => !busy && onHot(null)}
+          >
+            {stack.length > 1 && (
+              <span
+                className="wb-stackbar__drag"
+                role="button"
+                tabIndex={0}
+                aria-label={`${t.stack.moveBand}: ${e.filament.name}`}
+                title={t.stack.moveBand}
+                onPointerDown={(ev) => {
+                  if (ev.button !== 0) return;
+                  ev.preventDefault();
+                  ev.currentTarget.setPointerCapture(ev.pointerId);
+                  setBandDrag({ from: e.slotId, y: ev.clientY - ref.current!.getBoundingClientRect().top, target: null });
+                }}
+                onPointerMove={(ev) => bandDragTo(ev.clientY)}
+                onPointerUp={(ev) => {
+                  ev.currentTarget.releasePointerCapture(ev.pointerId);
+                  bandDragTo(ev.clientY);
+                  bandDrop();
+                }}
+                onPointerCancel={() => setBandDrag(null)}
+                onKeyDown={(ev) => {
+                  if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+                  ev.preventDefault();
+                  const other = stack[i + (ev.key === 'ArrowUp' ? 1 : -1)];
+                  if (other) onSwap(e.slotId, other.slotId);
+                }}
+              >
+                <IconGrip size={12} />
+              </span>
+            )}
+            {canSplit && <Menu
+              align="left"
+              trigger={({ open, toggle }) => (
+                <button
+                  type="button"
+                  className="wb-stackbar__add-btn"
+                  aria-label={`${t.stack.addHere}: ${e.filament.name}`}
+                  aria-expanded={open}
+                  title={t.stack.addHere}
+                  onClick={toggle}
+                >
+                  <IconPlus size={12} />
+                </button>
+              )}
+            >
+              {(close) => addMenu(e.slotId, close)}
+            </Menu>}
+          </div>
+        );
+      })}
+      {bandDrag && dragged && (
+        <span
+          className="wb-stackbar__ghost"
+          style={{ top: bandDrag.y, background: dragged.filament.colorHex }}
+          aria-hidden
+        />
+      )}
+      <span className="wb-stackbar__cap wb-stackbar__cap--top" aria-hidden>{total}</span>
+      <span className="wb-stackbar__cap wb-stackbar__cap--bottom" aria-hidden>1</span>
+    </div>
+  );
+}
+
+/** "New filament", then the filaments already in the stack, then the library ones not in use. */
+function FilamentPicker({
+  stack,
+  library,
+  onNew,
+  onPick,
+}: {
+  stack: StackEntry[];
+  library: FilamentRecord[];
+  onNew: () => void;
+  onPick: (f: FilamentRecord | StackFilament) => void;
+}) {
+  const inUse = filamentsInUse(stack);
+  const used = new Set(inUse.map(filamentKey));
+  const unused = library.filter((f) => !used.has(f.id));
+  const item = (f: FilamentRecord | StackFilament, key: string) => (
+    <MenuItem
+      key={key}
+      icon={<span className="wb-swatch wb-swatch--sm" style={{ background: f.colorHex }} />}
+      hint={`${f.brand ? `${f.brand} · ` : ''}${t.stack.td} ${formatMm(f.tdMm)} mm`}
+      onClick={() => onPick(f)}
+    >
+      {f.name}
+    </MenuItem>
+  );
+  return (
+    <div className="wb-library-menu">
+      <MenuItem icon={<IconPlus />} onClick={onNew}>
+        {t.stack.newFilament}
+      </MenuItem>
+      {inUse.length > 0 && (
+        <>
+          <div className="hc-menu__sep" />
+          <div className="hc-menu__label">{t.stack.inUse}</div>
+          {inUse.map((f) => item(f, `use:${filamentKey(f)}`))}
+        </>
+      )}
+      {unused.length > 0 && (
+        <>
+          <div className="hc-menu__sep" />
+          <div className="hc-menu__label">{t.stack.unused}</div>
+          {unused.map((f) => item(f, f.id))}
+        </>
+      )}
     </div>
   );
 }

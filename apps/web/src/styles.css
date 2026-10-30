@@ -137,6 +137,33 @@ button.wb-swatch:hover { transform: scale(1.06); }
   background: #fff; color: #111; font-size: 11px; font-weight: 600; pointer-events: none;
   animation: hc-fade-in 100ms var(--ease);
 }
+.wb-stackbar__drag {
+  display: grid; place-items: center; width: 14px; height: 18px; border-radius: 4px; flex-shrink: 0;
+  background: #fff; color: #111; cursor: grab; touch-action: none; box-shadow: 0 1px 4px rgba(0,0,0,0.45);
+}
+.wb-stackbar__drag:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.wb-stackbar__band[data-dragging="true"] { opacity: 0.4; }
+.wb-stackbar__band[data-drop="true"] { box-shadow: inset 0 0 0 2px var(--accent); filter: brightness(1.15); }
+.wb-stackbar__insert {
+  position: absolute; left: -4px; width: 30px; height: 3px; margin-bottom: -1.5px; border-radius: 2px;
+  background: var(--accent); pointer-events: none; z-index: 4; animation: wb-insert-in 140ms ease-out;
+}
+.wb-stackbar__ghost {
+  position: absolute; left: -6px; width: 34px; height: 10px; margin-top: -5px; border-radius: 3px; z-index: 6;
+  pointer-events: none; opacity: 0.9; box-shadow: 0 0 0 1.5px #fff, 0 4px 12px rgba(0,0,0,0.5);
+}
+.wb-stackbar__add {
+  position: absolute; left: 2px; height: 0; display: flex; align-items: center; gap: 2px; z-index: 3;
+  opacity: 0; pointer-events: none; transition: opacity var(--fast);
+}
+.wb-stackbar__add[data-show="true"], .wb-stackbar__add:focus-within { opacity: 1; pointer-events: auto; }
+.wb-stackbar__add:focus-within { z-index: 5; }
+.wb-stackbar__add-btn {
+  display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%;
+  background: #fff; color: #111; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.45);
+  transition: transform var(--fast);
+}
+.wb-stackbar__add-btn:hover, .wb-stackbar__add-btn[aria-expanded="true"] { transform: scale(1.12); }
 .wb-stackbar__cap { position: absolute; left: 26px; font-size: 10px; color: var(--text-3); pointer-events: none; }
 .wb-stackbar__cap--top { top: 2px; }
 .wb-stackbar__cap--bottom { bottom: 2px; }

@@ -46,13 +46,75 @@ export function setStartLayer(stack: StackEntry[], slotId: string, layer: number
   return sorted;
 }
 
-/** Append a filament on top of the stack, halfway between the current top swap and the last layer. */
-export function addOnTop(stack: StackEntry[], f: FilamentRecord | StackFilament, totalLayers: number): StackEntry[] {
+/**
+ * Highest layer index any pixel reaches (histogram index n = columns with n layers).
+ * Swaps above it change nothing in the image. Falls back to the last layer.
+ */
+export function topReachedLayer(histogram: Uint32Array | null, totalLayers: number): number {
+  if (histogram) for (let n = Math.min(totalLayers, histogram.length - 1); n >= 1; n--) if (histogram[n] > 0) return n - 1;
+  return totalLayers - 1;
+}
+
+/** Layers [start, end) of the band of `slotId`, with the top band ending above `topLayer`. */
+export function bandRange(stack: StackEntry[], slotId: string, topLayer: number): { start: number; end: number } | null {
+  const sorted = sortStack(stack);
+  const i = sorted.findIndex((e) => e.slotId === slotId);
+  if (i < 0) return null;
+  const end = i + 1 < sorted.length ? sorted[i + 1].startLayer : topLayer + 1;
+  return { start: sorted[i].startLayer, end };
+}
+
+/**
+ * Split the band of `slotId` in half: the new filament takes its upper half.
+ * Returns the stack unchanged when the band is thinner than two layers.
+ */
+export function insertInBand(
+  stack: StackEntry[],
+  slotId: string,
+  f: FilamentRecord | StackFilament,
+  topLayer: number,
+): StackEntry[] {
+  const range = bandRange(stack, slotId, topLayer);
+  if (!range || range.end - range.start < 2) return stack;
+  const start = range.start + Math.ceil((range.end - range.start) / 2);
+  return sortStack([...stack, createSlot(f, start)]);
+}
+
+/**
+ * Add a filament on top of the stack, halfway between the current top swap and
+ * the highest layer the image reaches. With no room left there, the thickest
+ * band is split instead so the new colour always shows up.
+ */
+export function addOnTop(stack: StackEntry[], f: FilamentRecord | StackFilament, topLayer: number): StackEntry[] {
   const sorted = sortStack(stack);
   if (sorted.length === 0) return [createSlot(f, 0)];
   const topStart = sorted[sorted.length - 1].startLayer;
-  const start = Math.min(totalLayers - 1, Math.max(topStart + 1, Math.round((topStart + totalLayers) / 2)));
-  return [...sorted, createSlot(f, start)];
+  if (topLayer - topStart >= 1) {
+    return [...sorted, createSlot(f, Math.max(topStart + 1, Math.round((topStart + topLayer + 1) / 2)))];
+  }
+  let widest = sorted[0];
+  let widestSize = 0;
+  for (const e of sorted) {
+    const r = bandRange(sorted, e.slotId, topLayer)!;
+    if (r.end - r.start > widestSize) {
+      widest = e;
+      widestSize = r.end - r.start;
+    }
+  }
+  if (widestSize >= 2) return insertInBand(sorted, widest.slotId, f, topLayer);
+  return [...sorted, createSlot(f, topStart + 1)];
+}
+
+/** Same physical filament: same library entry, or same colour, TD and name when unsaved. */
+export function filamentKey(f: StackFilament): string {
+  return f.libraryId ?? `${f.colorHex.toLowerCase()}|${f.tdMm}|${f.name}`;
+}
+
+/** Distinct filaments of the stack, base first. */
+export function filamentsInUse(stack: StackEntry[]): StackFilament[] {
+  const seen = new Map<string, StackFilament>();
+  for (const e of sortStack(stack)) if (!seen.has(filamentKey(e.filament))) seen.set(filamentKey(e.filament), e.filament);
+  return [...seen.values()];
 }
 
 export function removeSlot(stack: StackEntry[], slotId: string): StackEntry[] {

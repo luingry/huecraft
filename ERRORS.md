@@ -23,3 +23,9 @@
 - **Symptom:** a `type="0"` (ColorChange) entry in `Metadata/custom_gcode_per_layer.xml` produces no M600 in Bambu Studio G-code; PausePrint (`type="1"`) produces `M400 U1`.
 - **Cause:** Bambu Studio's `emit_custom_gcode_per_print_z` has the colour-change branch compiled out (`#if 0`); OrcaSlicer/PrusaSlicer still emit `color_change_gcode` (M600).
 - **Fix:** use the "pause" swap command for Bambu printers; "color-change" is for M600 firmwares (Orca/Prusa).
+
+## A newly added filament does not show up in the preview
+
+- **Symptom:** after adding 4–5 filaments with "Adicionar filamento", the last one is listed but never appears in the image (or has no band in the layer bar).
+- **Cause:** `addOnTop` placed each new swap halfway between the current top swap and the *last layer of the print*. Each add halves the remaining gap, so after a few adds the swap lands on/after the last layer, or above the highest layer any pixel reaches. There is no limit on the number of colours.
+- **Fix:** `addOnTop` now uses the highest layer the image reaches (`topReachedLayer`, from the layer histogram) and, when no room is left above the top swap, splits the thickest band instead. Rows whose swap starts above the reached layer are dimmed with a tooltip.
