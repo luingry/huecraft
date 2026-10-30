@@ -138,6 +138,7 @@ export function Stage({
               <MeshView
                 result={res}
                 colorMode={meshColors}
+                cutLayers={cut}
                 maxLayerZ={layerTopZ(wb.project.print, cut - 1)}
                 background={background}
                 resetToken={resetToken}

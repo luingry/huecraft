@@ -6,12 +6,13 @@ import type { PreviewResult } from '@huecraft/engine';
 export type MeshColorMode = 'printed' | 'slicer';
 
 /** Engine colours are sRGB; three.js expects linear vertex colours. */
+const SRGB_TO_LINEAR = new Float32Array(256).map((_, i) => {
+  const c = i / 255;
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+});
+
 function toLinear(src: Float32Array): Float32Array {
-  const lut = new Float32Array(256);
-  for (let i = 0; i < 256; i++) {
-    const c = i / 255;
-    lut[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
-  }
+  const lut = SRGB_TO_LINEAR;
   const out = new Float32Array(src.length);
   for (let i = 0; i < src.length; i++) out[i] = lut[Math.max(0, Math.min(255, Math.round(src[i] * 255)))];
   return out;
@@ -24,24 +25,26 @@ interface Viewer {
   controls: OrbitControls;
   group: THREE.Group;
   mesh: THREE.Mesh | null;
-  clip: THREE.Plane;
+  cut: { uCutZ: { value: number }; uCutColor: { value: THREE.Color } };
   framedFor: string;
   frame: () => void;
 }
 
 /**
- * Terraced 3D preview, like the slicer's layer view. `maxLayer` clips the
- * model at the top of that layer so swaps can be inspected one by one.
+ * Terraced 3D preview, like the slicer's layer view. `cutLayers` cuts the
+ * model at the top of that layer (`maxLayerZ`) so swaps can be inspected one by one.
  */
 export function MeshView({
   result,
   colorMode,
+  cutLayers,
   maxLayerZ,
   background,
   resetToken,
 }: {
   result: PreviewResult;
   colorMode: MeshColorMode;
+  cutLayers: number;
   maxLayerZ: number;
   background: string;
   resetToken: number;
@@ -53,7 +56,6 @@ export function MeshView({
     const mount = mountRef.current!;
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
-    renderer.localClippingEnabled = true;
     mount.appendChild(renderer.domElement);
     renderer.domElement.className = 'wb-mesh-canvas';
 
@@ -75,7 +77,7 @@ export function MeshView({
 
     const group = new THREE.Group();
     scene.add(group);
-    const clip = new THREE.Plane(new THREE.Vector3(0, 0, -1), 1000);
+    const cut = { uCutZ: { value: 1e6 }, uCutColor: { value: new THREE.Color() } };
 
     const v: Viewer = {
       renderer,
@@ -84,7 +86,7 @@ export function MeshView({
       controls,
       group,
       mesh: null,
-      clip,
+      cut,
       framedFor: '',
       frame: () => {
         if (!v.mesh) return;
@@ -162,9 +164,24 @@ export function MeshView({
       vertexColors: true,
       roughness: 0.85,
       metalness: 0,
-      clippingPlanes: [v.clip],
       side: THREE.DoubleSide,
     });
+    // Layer cut: everything above the cut is flattened onto it, so the model shows a
+    // solid layer instead of a hollow shell. Flattened tops take the cut layer's
+    // colour; walls just get shorter and keep theirs.
+    mat.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, v.cut);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nuniform float uCutZ;\nuniform vec3 uCutColor;')
+        .replace(
+          '#include <begin_vertex>',
+          `#include <begin_vertex>
+          if (transformed.z > uCutZ) {
+            transformed.z = uCutZ;
+            if (objectNormal.z > 0.5) vColor = uCutColor;
+          }`,
+        );
+    };
     v.mesh = new THREE.Mesh(geo, mat);
     v.group.add(v.mesh);
 
@@ -177,8 +194,13 @@ export function MeshView({
 
   useEffect(() => {
     const v = viewer.current;
-    if (v) v.clip.constant = maxLayerZ + 1e-4;
-  }, [maxLayerZ]);
+    if (!v) return;
+    const active = cutLayers < result.totalLayers;
+    v.cut.uCutZ.value = active ? maxLayerZ + 1e-4 : 1e6;
+    const lut = colorMode === 'printed' ? result.printedLut : result.slicerLut;
+    const n = Math.max(0, Math.min(cutLayers, lut.length / 3 - 1)) * 3;
+    v.cut.uCutColor.value.setRGB(SRGB_TO_LINEAR[lut[n]], SRGB_TO_LINEAR[lut[n + 1]], SRGB_TO_LINEAR[lut[n + 2]]);
+  }, [maxLayerZ, cutLayers, result, colorMode]);
 
   useEffect(() => {
     const v = viewer.current;
