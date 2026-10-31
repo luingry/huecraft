@@ -173,7 +173,8 @@ export function smoothingRadiusForGrid(smoothing: number, size: GridSize): numbe
 /**
  * Relief parameter t in [0, 1] per grid pixel.
  * luma → +brightness → contrast around 0.5 → clamp → gamma → optional invert
- * → × alpha (transparent = 0, i.e. base only) → optional box blur.
+ * → × alpha (transparent = 0, i.e. base only) → optional box blur
+ * → optional posterize into `posterize` flat steps.
  */
 export function reliefField(input: LumaAlpha, relief: ReliefParams): Float32Array {
   const { width, height, luma, alpha } = input;
@@ -205,6 +206,11 @@ export function reliefField(input: LumaAlpha, relief: ReliefParams): Float32Arra
   }
   const r = smoothingRadiusForGrid(relief.smoothing, input);
   if (r > 0) boxBlur(out, width, height, r);
+  const steps = Math.floor(relief.posterize ?? 0);
+  if (steps >= 2) {
+    const s = steps - 1;
+    for (let i = 0; i < n; i++) out[i] = Math.round(out[i] * s) / s;
+  }
   return out;
 }
 

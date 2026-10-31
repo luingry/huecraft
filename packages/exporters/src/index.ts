@@ -276,6 +276,32 @@ export interface ThreeMfOptions {
   sizeMm?: { width: number; height: number };
   /** Deflate level 0..9. Default 1: ~3x faster than 6 on a 2M-triangle model, ~5 % larger. */
   compressionLevel?: ZipOptions['level'];
+  /**
+   * Parts of the mesh printed with different filaments (multi-material), as
+   * consecutive triangle ranges. Each is written as its own object, assembled by
+   * a components object, which Bambu Studio (checked with its CLI), OrcaSlicer
+   * and PrusaSlicer load as one object with one named part per range. Filaments
+   * are assigned in the slicer; triangle-range volumes in
+   * Slic3r_PE_model.config are not used, as Bambu Studio merges them into one part.
+   */
+  volumes?: MeshVolume[];
+}
+
+export interface MeshVolume {
+  name: string;
+  /** 1-based filament slot the part is meant for (shown in its name by the caller). */
+  extruder: number;
+  /** Inclusive triangle range. */
+  firstTriangle: number;
+  lastTriangle: number;
+}
+
+/** Zip of binary STLs (one per part) plus text attachments. */
+export function exportStlZip(parts: { fileName: string; mesh: MeshData }[], attachments: Record<string, string> = {}): Uint8Array {
+  const files: Record<string, Uint8Array> = {};
+  for (const p of parts) files[p.fileName] = new Uint8Array(exportBinaryStl(p.mesh, p.fileName));
+  for (const [path, text] of Object.entries(attachments)) files[path] = strToU8(text);
+  return zipSync(files, { level: 1 });
 }
 
 const CONTENT_TYPES = `<?xml version="1.0" encoding="UTF-8"?>
@@ -309,29 +335,22 @@ export function build3mfModel(mesh: MeshData, opts: ThreeMfOptions = {}): Uint8A
   w.bytes(strToU8(` <metadata name="Application">${app}</metadata>\n`));
   if (tpl) w.ascii(' <metadata name="BambuStudio:3mfVersion">1</metadata>\n');
   w.bytes(strToU8(` <metadata name="Title">${name}</metadata>\n`));
-  w.ascii(' <resources>\n  <object id="1" type="model">\n');
-  w.bytes(strToU8(`   <metadata name="name">${name}</metadata>\n`));
-  w.ascii('   <mesh>\n    <vertices>\n');
-  for (let v = 0, o = 0; v < vertexCount; v++, o += 3) {
-    w.ascii('<vertex x="');
-    w.fixed4(positions[o]);
-    w.ascii('" y="');
-    w.fixed4(positions[o + 1]);
-    w.ascii('" z="');
-    w.fixed4(positions[o + 2]);
-    w.ascii('"/>\n');
+  w.ascii(' <resources>\n');
+  const volumes = opts.volumes ?? [];
+  let itemId = 1;
+  if (volumes.length === 0) {
+    writeMeshObject(w, 1, name, positions, indices, 0, triangleCount - 1, null);
+  } else {
+    // One mesh object per part, assembled by a components object: slicers load
+    // that as one object with one part per component.
+    const remap = new Int32Array(vertexCount);
+    volumes.forEach((v, i) => writeMeshObject(w, i + 1, escapeXml(v.name), positions, indices, v.firstTriangle, v.lastTriangle, remap));
+    itemId = volumes.length + 1;
+    w.bytes(strToU8(`  <object id="${itemId}" type="model" name="${name}">\n   <metadata name="name">${name}</metadata>\n   <components>\n`));
+    for (let i = 0; i < volumes.length; i++) w.ascii(`    <component objectid="${i + 1}"/>\n`);
+    w.ascii('   </components>\n  </object>\n');
   }
-  w.ascii('    </vertices>\n    <triangles>\n');
-  for (let t = 0, o = 0; t < triangleCount; t++, o += 3) {
-    w.ascii('<triangle v1="');
-    w.uint(indices[o]);
-    w.ascii('" v2="');
-    w.uint(indices[o + 1]);
-    w.ascii('" v3="');
-    w.uint(indices[o + 2]);
-    w.ascii('"/>\n');
-  }
-  w.ascii('    </triangles>\n   </mesh>\n  </object>\n </resources>\n <build>\n  <item objectid="1"');
+  w.ascii(` </resources>\n <build>\n  <item objectid="${itemId}"`);
   if (tpl && opts.sizeMm) {
     const c = bedCentre(tpl.settings);
     if (c) {
@@ -344,6 +363,64 @@ export function build3mfModel(mesh: MeshData, opts: ThreeMfOptions = {}): Uint8A
   }
   w.ascii(' printable="1"/>\n </build>\n</model>\n');
   return w.result();
+}
+
+/**
+ * One <object> with the triangles first..last (inclusive). With `remap`, only
+ * the vertices those triangles use are written (renumbered); `remap` is scratch
+ * space of one entry per vertex.
+ */
+function writeMeshObject(
+  w: ByteWriter,
+  id: number,
+  escapedName: string,
+  positions: Float32Array,
+  indices: Uint32Array,
+  first: number,
+  last: number,
+  remap: Int32Array | null,
+): void {
+  const attr = remap ? ` name="${escapedName}"` : '';
+  w.bytes(strToU8(`  <object id="${id}" type="model"${attr}>\n   <metadata name="name">${escapedName}</metadata>\n`));
+  w.ascii('   <mesh>\n    <vertices>\n');
+  const vertex = (v: number) => {
+    const o = v * 3;
+    w.ascii('<vertex x="');
+    w.fixed4(positions[o]);
+    w.ascii('" y="');
+    w.fixed4(positions[o + 1]);
+    w.ascii('" z="');
+    w.fixed4(positions[o + 2]);
+    w.ascii('"/>\n');
+  };
+  if (remap) {
+    remap.fill(-1);
+    let next = 0;
+    for (let k = first * 3; k < (last + 1) * 3; k++) {
+      const v = indices[k];
+      if (remap[v] < 0) {
+        remap[v] = next++;
+        vertex(v);
+      }
+    }
+  } else {
+    for (let v = 0; v < positions.length / 3; v++) vertex(v);
+  }
+  w.ascii('    </vertices>\n    <triangles>\n');
+  for (let t = first; t <= last; t++) {
+    const o = t * 3;
+    const id0 = remap ? remap[indices[o]] : indices[o];
+    const id1 = remap ? remap[indices[o + 1]] : indices[o + 1];
+    const id2 = remap ? remap[indices[o + 2]] : indices[o + 2];
+    w.ascii('<triangle v1="');
+    w.uint(id0);
+    w.ascii('" v2="');
+    w.uint(id1);
+    w.ascii('" v3="');
+    w.uint(id2);
+    w.ascii('"/>\n');
+  }
+  w.ascii('    </triangles>\n   </mesh>\n  </object>\n');
 }
 
 function patchedSettings(opts: ThreeMfOptions): string {

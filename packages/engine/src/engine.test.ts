@@ -65,6 +65,25 @@ describe('brush paint', () => {
     expect(resolvePaintLayers([dot()], moved, 20)[0].layer).toBe(15);
   });
 
+  it.each([
+    ['normal', {}, false],
+    ['sampled with line width', { blend: 'sampled', sampleLayer: 6, tolerance: 0.3 }, true],
+    ['erase over a dab', { mode: 'erase' }, false],
+    ['brighten', { mode: 'brighten' }, false],
+    ['darken with line width', { mode: 'darken' }, true],
+  ] as const)('a growing stroke previewed step by step matches a fresh render (%s)', (_name, over, simulateLineWidth) => {
+    const core = new EngineCore();
+    core.setImage(image);
+    const settled = dot({ id: 's0', points: [0.3, 0.4, 0.6, 0.6], radius: 0.08 });
+    const points: number[] = [];
+    for (let k = 0; k < 12; k++) {
+      points.push(0.2 + 0.05 * k, 0.5 + 0.2 * Math.sin(k / 2));
+      const live = dot({ id: 's1', radius: 0.06, softness: 0.5, opacity: 0.8, points: [...points], ...over });
+      const params = previewParams({ paint: [settled, live], simulateLineWidth });
+      expect([...core.preview(params).layerField]).toEqual([...runPreview(image, params).layerField]);
+    }
+  });
+
   it('raises a full-opacity dab exactly to the target layer, leaving the rest alone', () => {
     const plain = runPreview(image, previewParams());
     const r = runPreview(image, previewParams({ paint: [dot()] }));
@@ -81,6 +100,31 @@ describe('brush paint', () => {
     expect(mid).toBeLessThan(totalLayerCount(print));
     const erased = runPreview(image, previewParams({ paint: [dot(), dot({ id: 's2', mode: 'erase', radius: 0.2 })] }));
     expect(Array.from(erased.layerField)).toEqual(Array.from(plain.layerField));
+  });
+
+  it('brighten / darken only move columns to lighter / darker colours, more with more opacity', () => {
+    const plain = runPreview(image, previewParams());
+    const lut = plain.printedLut;
+    const lum = (n: number) => 0.2126 * lut[n * 3] + 0.7152 * lut[n * 3 + 1] + 0.0722 * lut[n * 3 + 2];
+    const wide = { radius: 2, points: [0.5, 0.5] };
+    const total = (r: { layerField: Uint16Array }) => r.layerField.reduce((a, n) => a + lum(n), 0);
+    for (const [mode, dir] of [['brighten', 1], ['darken', -1]] as const) {
+      const soft = runPreview(image, previewParams({ paint: [dot({ ...wide, mode, opacity: 0.3 })] }));
+      const strong = runPreview(image, previewParams({ paint: [dot({ ...wide, mode, opacity: 1 })] }));
+      let changed = 0;
+      for (let i = 0; i < plain.layerField.length; i++) {
+        const before = lum(plain.layerField[i]);
+        if (soft.layerField[i] !== plain.layerField[i]) {
+          changed++;
+          expect(dir * (lum(soft.layerField[i]) - before)).toBeGreaterThan(0);
+        }
+        expect(dir * (lum(strong.layerField[i]) - before)).toBeGreaterThanOrEqual(0);
+      }
+      expect(changed).toBeGreaterThan(0);
+      expect(dir * (total(strong) - total(soft))).toBeGreaterThan(0);
+    }
+    const none = runPreview(image, previewParams({ paint: [dot({ ...wide, mode: 'brighten', opacity: 0.001 })] }));
+    expect(Array.from(none.layerField)).toEqual(Array.from(plain.layerField));
   });
 
   it('raise / lower blends only touch columns on the other side of the target', () => {
@@ -266,7 +310,8 @@ describe('export', () => {
     const mesh = { positions: new Float32Array(verts.flat()), indices: new Uint32Array(tris.flat()), triangleCount: tris.length };
     expect(checkWatertight(mesh).ok).toBe(true);
     expect(signedVolume(mesh)).toBeGreaterThan(0);
-    const tops = verts.slice(0, 9 * 7).map((v) => v[2]);
+    // Top vertices are the ones above the bed (walls and bottom sit at z = 0).
+    const tops = verts.map((v) => v[2]).filter((z) => z > 0);
     if (snapToLayers) {
       for (const z of tops) {
         const k = Math.round((z - p.firstLayerHeightMm) / p.layerHeightMm);
@@ -274,6 +319,24 @@ describe('export', () => {
       }
     }
     expect(Math.min(...tops)).toBeGreaterThanOrEqual(p.baseThicknessMm - 1e-4);
+  });
+
+  it('the exported top keeps every vertex on a layer top and merges plateaus', () => {
+    const w = 120;
+    const h = 80;
+    const p = { ...print, widthMm: 60, exportResolutionMm: 0.5, snapToLayers: true };
+    const r = runExport(gradient(w, h), { name: 's', relief: DEFAULT_RELIEF, print: p, stack, swapCommand: 'pause', format: '3mf' });
+    const model = readArchiveText(r.bytes)['3D/3dmodel.model'];
+    const verts = [...model.matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"\/>/g)].map((m) => [+m[1], +m[2], +m[3]]);
+    const tris = [...model.matchAll(/<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"\/>/g)].map((m) => [+m[1], +m[2], +m[3]]);
+    const mesh = { positions: new Float32Array(verts.flat()), indices: new Uint32Array(tris.flat()), triangleCount: tris.length };
+    expect(checkWatertight(mesh).ok).toBe(true);
+    expect(signedVolume(mesh)).toBeGreaterThan(0);
+    for (const z of verts.map((v) => v[2]).filter((z) => z > 0)) {
+      const k = Math.round((z - p.firstLayerHeightMm) / p.layerHeightMm);
+      expect(z).toBeCloseTo(layerTopZ(p, k), 3);
+    }
+    expect(r.triangleCount).toBeLessThan((2 * (w - 1) * (h - 1)) / 2);
   });
 
   it('writes the swaps into the 3MF at the layer tops', () => {
@@ -287,6 +350,65 @@ describe('export', () => {
     expect(files['Metadata/hueCraft_swap_plan.txt']).toBe(r.swapText);
     expect(r.swapText).toContain('Layer 9 (Z 0.800 mm) → pause, load "b" #ff0000');
     expect(r.swapText).toContain('total layers: 19');
+  });
+
+  it('face down: one watertight part per filament that together fill the slab', () => {
+    const p = { ...print, widthMm: 30, exportResolutionMm: 0.5 };
+    const r = runExport(gradient(60, 40), { name: 'fd', relief: DEFAULT_RELIEF, print: p, stack, swapCommand: 'pause', format: '3mf', orientation: 'faceDown' });
+    expect(r.fileName).toBe('fd (face down).3mf');
+    const files = readArchiveText(r.bytes);
+    expect(files['Metadata/custom_gcode_per_layer.xml']).toBeUndefined();
+    const model = files['3D/3dmodel.model'];
+    // One mesh object per filament, assembled by a components object.
+    const objects = [...model.matchAll(/<object id="(\d+)" type="model"[^>]*>\s*<metadata name="name">([^<]*)<\/metadata>\s*<mesh>([\s\S]*?)<\/mesh>/g)].map((m) => ({
+      name: m[2],
+      verts: [...m[3].matchAll(/<vertex x="([^"]+)" y="([^"]+)" z="([^"]+)"\/>/g)].map((v) => [+v[1], +v[2], +v[3]]),
+      tris: [...m[3].matchAll(/<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"\/>/g)].map((t) => [+t[1], +t[2], +t[3]]),
+    }));
+    expect(objects.map((o) => o.name)).toEqual(['1 · Clear (transparent)', '2 · c', '3 · b', '4 · a']);
+    expect(model.match(/<component objectid="\d+"\/>/g)).toHaveLength(4);
+    expect(model).toContain('<item objectid="5"');
+    const T = 19;
+    const slab = layerTopZ(p, T - 1);
+    const heightMm = (p.widthMm * 40) / 60;
+    let total = 0;
+    // Plate side (z = 0, facing down) and back (z = slab, facing up) must each cover the whole rectangle.
+    let plateArea = 0;
+    let backArea = 0;
+    const verts: number[][] = [];
+    for (const o of objects) {
+      const part = { positions: new Float32Array(o.verts.flat()), indices: new Uint32Array(o.tris.flat()), triangleCount: o.tris.length };
+      expect(checkWatertight(part).ok).toBe(true);
+      const vol = signedVolume(part);
+      expect(vol).toBeGreaterThan(0);
+      total += vol;
+      for (const [a, b, c] of o.tris) {
+        const [pa, pb, pc] = [o.verts[a], o.verts[b], o.verts[c]];
+        const nz = ((pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0])) / 2;
+        if (pa[2] === 0 && pb[2] === 0 && pc[2] === 0) plateArea -= nz;
+        if ([pa, pb, pc].every((q) => Math.abs(q[2] - slab) < 1e-4)) backArea += nz;
+      }
+      verts.push(...o.verts);
+    }
+    expect(total).toBeCloseTo(p.widthMm * heightMm * slab, 1);
+    expect(plateArea).toBeCloseTo(p.widthMm * heightMm, 2);
+    expect(backArea).toBeCloseTo(p.widthMm * heightMm, 2);
+    // Every vertex sits on a layer top counted from the plate.
+    for (const [, , z] of verts) {
+      if (z === 0) continue;
+      const k = Math.round((z - p.firstLayerHeightMm) / p.layerHeightMm);
+      expect(z).toBeCloseTo(layerTopZ(p, k), 3);
+    }
+    expect(Math.max(...verts.map((v) => v[2]))).toBeCloseTo(slab, 4);
+    expect(r.swapText).toContain('Filament 1: "Clear (transparent)"');
+  });
+
+  it('face down STL is a zip with one file per filament', () => {
+    const r = runExport(gradient(20, 20), { name: 'fd', relief: DEFAULT_RELIEF, print: { ...print, widthMm: 10, exportResolutionMm: 0.5 }, stack, swapCommand: 'pause', format: 'stl', orientation: 'faceDown' });
+    expect(r.fileName).toBe('fd (face down).zip');
+    const names = Object.keys(readArchiveText(r.bytes));
+    expect(names.filter((n) => n.endsWith(".stl"))).toHaveLength(4);
+    expect(names).toContain('fd - filamentos.txt');
   });
 
   it('export grid follows exportResolutionMm, not the preview', () => {

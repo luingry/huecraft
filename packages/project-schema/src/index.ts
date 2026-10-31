@@ -17,6 +17,11 @@ export interface ReliefParams {
   invert: boolean;
   /** Box-blur radius in output pixels used to clean noisy images. 0 = off. */
   smoothing: number;
+  /**
+   * Number of flat height steps the relief is cut into (after smoothing), for
+   * a simpler print with less shading. 0 = off (continuous relief).
+   */
+  posterize: number;
 }
 
 export interface PrintParams {
@@ -59,6 +64,15 @@ export interface StackFilament {
 /** How a filament swap is written into the exported 3MF. */
 export type SwapCommand = 'pause' | 'color-change';
 
+/**
+ * How the print lies on the bed. 'faceUp': the image is the top relief, colours
+ * change by layer with filament swaps. 'faceDown': the image faces the build
+ * plate (smooth or textured finish); the model is turned over and the gaps in
+ * front of the relief are filled with clear filament, so every layer mixes
+ * filaments and needs a multi-material printer (AMS / MMU).
+ */
+export type PrintOrientation = 'faceUp' | 'faceDown';
+
 export interface ExportParams {
   swapCommand: SwapCommand;
 }
@@ -74,7 +88,13 @@ export type PaintBlend = 'normal' | 'raise' | 'lower' | 'onLight' | 'onDark' | '
  */
 export interface PaintStroke {
   id: string;
-  mode: 'paint' | 'erase';
+  /**
+   * 'paint' pushes the area to a filament's band, 'erase' back to the unpainted
+   * relief, 'brighten' / 'darken' move each column to a layer whose printed
+   * colour is lighter / darker, by up to `opacity` × the range of printable
+   * luminances (scaled by the brush coverage).
+   */
+  mode: 'paint' | 'erase' | 'brighten' | 'darken';
   /**
    * How paint meets the surface: 'normal' pulls every column to the target,
    * 'raise' / 'lower' only touch columns below / above it, 'onLight' / 'onDark'
@@ -128,6 +148,7 @@ export const DEFAULT_RELIEF: ReliefParams = {
   gamma: 1,
   invert: false,
   smoothing: 0,
+  posterize: 0,
 };
 
 export const DEFAULT_PRINT: PrintParams = {

@@ -26,6 +26,11 @@ export function ControlPanel({ wb, onPickImage }: { wb: Workbench; onPickImage: 
             </Button>
           </div>
         )}
+        {wb.image && (
+          <Button size="sm" variant="ghost" block onClick={wb.openColorPresets}>
+            {t.image.colorReading}
+          </Button>
+        )}
         <Slider
           label={t.image.contrast}
           value={relief.contrast}
@@ -66,6 +71,15 @@ export function ControlPanel({ wb, onPickImage }: { wb: Workbench; onPickImage: 
               step={1}
               unit="px"
               onChange={(smoothing) => wb.updateRelief({ smoothing })}
+            />
+            <Slider
+              label={t.image.posterize}
+              value={relief.posterize}
+              min={0}
+              max={16}
+              step={1}
+              hint={t.image.posterizeHint}
+              onChange={(posterize) => wb.updateRelief({ posterize: posterize === 1 ? 0 : posterize })}
             />
           </Subgroup>
         )}

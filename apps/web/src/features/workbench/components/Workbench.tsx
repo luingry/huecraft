@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { readPref, writePref } from '../../project/storage';
 import { t } from '../../../i18n';
-import { useWorkbench } from '../useWorkbench';
+import { useWorkbench, type BrushTool } from '../useWorkbench';
+import { ColorPresetPicker } from './ColorPresetPicker';
+import { ExportDialog } from './ExportDialog';
 import { ControlPanel } from './ControlPanel';
 import { Stage, STAGE_TABS, type StageTab } from './Stage';
 import { TopBar } from './TopBar';
+
+const BRUSH_TOOLS: BrushTool[] = ['paint', 'brighten', 'darken'];
 
 function isTyping(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
@@ -46,7 +50,7 @@ export function Workbench() {
         w.redo();
       } else if (mod && key === 'e') {
         e.preventDefault();
-        w.exportFile('3mf');
+        w.requestExport('3mf');
       } else if (mod && key === 'o') {
         e.preventDefault();
         fileRef.current?.click();
@@ -55,14 +59,27 @@ export function Workbench() {
         e.preventDefault();
       } else if (!mod && !e.altKey && !isTyping(e.target) && /^[1-5]$/.test(e.key)) {
         setTab(STAGE_TABS[Number(e.key) - 1]);
+      } else if (!mod && !e.altKey && !isTyping(e.target) && key === 'b' && e.shiftKey) {
+        // Shift+B: next brush mode (Cor → Clarear → Escurecer), turning the brush on if needed.
+        e.preventDefault();
+        const i = BRUSH_TOOLS.indexOf(w.brush.tool);
+        const tool = w.brush.erase ? 'paint' : BRUSH_TOOLS[(i + 1) % BRUSH_TOOLS.length];
+        w.setBrush({ tool, erase: false });
+        if (tabRef.current !== '3d') setTab('3d');
+        if (w.orientation !== 'faceUp') w.setOrientation('faceUp');
+        w.setBrushActive(true);
+        w.showToast(t.brush.toolChanged(t.brush.tools[tool]));
       } else if (!mod && !e.altKey && !isTyping(e.target) && key === 'b' && !e.repeat) {
-        // The brush paints on the 3D view: turning it on from another tab goes there.
+        // The brush paints on the face-up 3D view: turning it on from elsewhere goes there.
+        if (w.orientation !== 'faceUp' && !w.brushActive) w.setOrientation('faceUp');
         if (tabRef.current !== '3d') {
           setTab('3d');
           w.setBrushActive(true);
         } else {
           w.setBrushActive(!w.brushActive);
         }
+      } else if (key === 'escape' && w.colorPresetsOpen) {
+        w.closeColorPresets();
       } else if (key === 'escape' && w.brushActive && !isTyping(e.target)) {
         w.setBrushActive(false);
       }
@@ -124,6 +141,8 @@ export function Workbench() {
         <ControlPanel wb={wb} onPickImage={pickImage} />
         <Stage wb={wb} tab={tab} onTab={setTab} onPickImage={pickImage} />
       </div>
+      <ColorPresetPicker wb={wb} />
+      <ExportDialog wb={wb} />
       {dragOver && (
         <div className="wb-drop-overlay">
           <span>{t.stage.dropOverlay}</span>

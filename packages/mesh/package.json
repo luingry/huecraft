@@ -17,7 +17,8 @@
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@huecraft/image-core": "workspace:*"
+    "@huecraft/image-core": "workspace:*",
+    "earcut": "3.2.4"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

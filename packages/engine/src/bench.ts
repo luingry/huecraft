@@ -7,12 +7,13 @@ import { DEFAULT_PRINT, DEFAULT_RELIEF, type StackEntry } from '@huecraft/projec
 import { EngineCore } from './core.js';
 import type { SourceImage } from './protocol.js';
 
-function photoLike(width: number, height: number): SourceImage {
+function photoLike(width: number, height: number, noise = true): SourceImage {
   const rgba = new Uint8ClampedArray(width * height * 4);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const o = (y * width + x) * 4;
-      const v = 128 + 60 * Math.sin(x / 37) * Math.cos(y / 23) + 50 * Math.sin((x + y) / 90) + ((x * 7919 + y * 104729) % 17) - 8;
+      const grain = noise ? ((x * 7919 + y * 104729) % 17) - 8 : 0;
+      const v = 128 + 60 * Math.sin(x / 37) * Math.cos(y / 23) + 50 * Math.sin((x + y) / 90) + grain;
       rgba[o] = rgba[o + 1] = rgba[o + 2] = v;
       rgba[o + 3] = 255;
     }
@@ -53,6 +54,19 @@ test('engine bench', () => {
   lines.push(`preview 640 cached + line width: ${lwMs.toFixed(1)} ms, ${r.mesh.triangleCount} tris`);
   lines.push(`  breakdown: ${Object.entries(r.timings).map(([k, v]) => `${k}=${v.toFixed(1)}`).join(' ')}`);
 
+  // Live brush stroke: the preview while a stroke grows (the last stroke is re-rasterised per update).
+  for (const radius of [0.03, 0.15]) {
+    const live: string[] = [];
+    for (const n of [50, 200, 800]) {
+      const points: number[] = [];
+      for (let k = 0; k < n; k++) points.push(0.5 + 0.35 * Math.cos(k / 40) * (k / n), 0.5 + 0.35 * Math.sin(k / 40) * (k / n));
+      const paint = [{ id: 's1', mode: 'paint' as const, slotId: 'c', layer: 20, radius, softness: 0.5, opacity: 1, points }];
+      core.preview({ ...params, paint });
+      live.push(`${n} pts ${time(() => core.preview({ ...params, paint }))[1].toFixed(1)} ms`);
+    }
+    lines.push(`preview 640 + live stroke r=${radius}: ${live.join(', ')}`);
+  }
+
   // Export of a 1000×1000 grid: 100 mm at 0.1 mm from a 1000×1000 source.
   const exportCore = new EngineCore();
   exportCore.setImage(photoLike(1000, 1000));
@@ -62,5 +76,14 @@ test('engine bench', () => {
   lines.push(`  breakdown: ${Object.entries(mf.timings).map(([k, v]) => `${k}=${v.toFixed(1)}`).join(' ')}`);
   const [stl, stlMs] = time(() => exportCore.export({ ...exportParams, format: 'stl' }));
   lines.push(`export STL 1000×1000: ${stlMs.toFixed(0)} ms, ${(stl.bytes.length / 1e6).toFixed(1)} MB`);
+
+  // Smooth source (no per-pixel grain): the flat plateaus the RTIN top merges.
+  const smoothCore = new EngineCore();
+  smoothCore.setImage(photoLike(2000, 2000, false));
+  for (const exportResolutionMm of [0.1, 0.05]) {
+    const [sm, smMs] = time(() => smoothCore.export({ ...exportParams, print: { ...exportParams.print, exportResolutionMm }, format: '3mf' }));
+    lines.push(`export 3MF smooth ${sm.timings.gridWidth}×${sm.timings.gridHeight}: ${smMs.toFixed(0)} ms, ${sm.triangleCount} tris, ${(sm.bytes.length / 1e6).toFixed(1)} MB`);
+    lines.push(`  breakdown: ${Object.entries(sm.timings).map(([k, v]) => `${k}=${v.toFixed(1)}`).join(' ')}`);
+  }
   console.log(`\n${lines.join('\n')}\n`);
 });

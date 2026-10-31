@@ -1,4 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { faceDownPreview } from '@huecraft/engine';
 import { filamentIndexAtLayer, layerTopZ } from '@huecraft/project-schema';
 import {
   Button,
@@ -7,14 +8,16 @@ import {
   IconCube,
   IconImage,
   IconLayers,
+  IconMoon,
   IconPalette,
+  IconSun,
   Segmented,
   Switch,
 } from '@huecraft/design-system';
 import { formatMm, t } from '../../../i18n';
 import { readPref, writePref } from '../../project/storage';
 import { sortStack } from '../stack';
-import type { Workbench } from '../useWorkbench';
+import type { BrushTool, Workbench } from '../useWorkbench';
 import { BrushMenu } from './BrushMenu';
 import { BitmapCanvas, IDENTITY, ImageViewport, RgbaCanvas, type ViewTransform } from './ImageViewport';
 import type { MeshColorMode } from './MeshView';
@@ -50,7 +53,20 @@ export function Stage({
   const [brushMenu, setBrushMenu] = useState<{ x: number; y: number } | null>(null);
   const closeBrushMenu = useCallback(() => setBrushMenu(null), []);
   const res = wb.result;
-  const brushOn = wb.brushActive && tab === '3d';
+  const faceDown = wb.orientation === 'faceDown';
+  const brushOn = wb.brushActive && tab === '3d' && !faceDown;
+  // Brighten / darken have no filament: their swatch and cursor show the direction.
+  const brushColor = wb.brush.tool === 'brighten' ? '#fff4b8' : wb.brush.tool === 'darken' ? '#5a5f73' : wb.brushSlot?.filament.colorHex;
+  const print = wb.project.print;
+  // Built on the main thread from the preview; null while the preview lags behind new print params.
+  const turned = useMemo(() => {
+    if (!faceDown || tab !== '3d' || !res) return null;
+    try {
+      return faceDownPreview(res, print);
+    } catch {
+      return null;
+    }
+  }, [faceDown, tab, res, print]);
 
   const setBackdrop = (b: Backdrop) => {
     setBackdropState(b);
@@ -114,23 +130,15 @@ export function Stage({
                 { value: 'slicer', label: t.stage.slicer },
               ]}
             />
-            <Button
-              size="sm"
-              variant="ghost"
-              className="wb-brush-btn"
-              aria-pressed={wb.brushActive}
-              title={t.brush.toggleHint}
-              onClick={() => wb.setBrushActive(!wb.brushActive)}
-            >
-              <IconBrush size={14} />
-              {t.brush.toggle}
-              {wb.brushActive && (
-                <span
-                  className="wb-swatch wb-swatch--xs"
-                  style={{ background: wb.brush.erase ? 'transparent' : wb.brushSlot?.filament.colorHex, outline: wb.brush.erase ? '1px dashed #ff6b6b' : undefined }}
-                />
-              )}
-            </Button>
+            <Segmented
+              ariaLabel={t.stage.orientation}
+              value={wb.orientation}
+              onChange={wb.setOrientation}
+              options={[
+                { value: 'faceUp', label: t.stage.faceUp, title: t.stage.faceUpHint },
+                { value: 'faceDown', label: t.stage.faceDown, title: t.stage.faceDownHint },
+              ]}
+            />
             <Button size="sm" variant="ghost" onClick={() => setResetToken((n) => n + 1)}>
               {t.stage.resetView}
             </Button>
@@ -159,9 +167,10 @@ export function Stage({
             <Suspense fallback={null}>
               <MeshView
                 result={res}
+                faceDown={turned}
                 colorMode={meshColors}
-                cutLayers={cut}
-                maxLayerZ={layerTopZ(wb.project.print, cut - 1)}
+                cutLayers={faceDown ? total : cut}
+                maxLayerZ={layerTopZ(wb.project.print, (faceDown ? total : cut) - 1)}
                 layerZ={(i) => layerTopZ(wb.project.print, i)}
                 background={background}
                 resetToken={resetToken}
@@ -170,18 +179,24 @@ export function Stage({
                     ? {
                         sizeMm: wb.brush.sizeMm,
                         softness: wb.brush.softness,
-                        colorHex: wb.brushSlot?.filament.colorHex ?? '#ffffff',
+                        colorHex: brushColor ?? '#ffffff',
                         erase: wb.brush.erase,
                       }
                     : null
                 }
                 onStroke={wb.paintStroke}
                 onBrushMenu={(x, y) => setBrushMenu({ x, y })}
+                onBrushSize={(sizeMm) => wb.setBrush({ sizeMm })}
               />
             </Suspense>
+            <BrushToolbar wb={wb} disabled={faceDown} />
             {brushOn && <div className="wb-brush-hint">{t.brush.hint}</div>}
             {brushOn && brushMenu && <BrushMenu wb={wb} x={brushMenu.x} y={brushMenu.y} onClose={closeBrushMenu} />}
-            <LayerScrubber total={total} value={cut} onChange={(v) => setLayerCut(v >= total ? null : v)} />
+            {faceDown ? (
+              <div className="wb-orient-legend">{t.stage.faceDownLegend}</div>
+            ) : (
+              <LayerScrubber total={total} value={cut} onChange={(v) => setLayerCut(v >= total ? null : v)} />
+            )}
           </>
         ) : tab === 'original' ? (
           <ImageViewport aspect={aspect} view={view} onView={setView}>
@@ -238,6 +253,47 @@ export function Stage({
         {res && <span className="hc-faint">{Math.round(res.timings.totalMs ?? 0)} ms</span>}
       </footer>
     </main>
+  );
+}
+
+const BRUSH_TOOLS: { tool: BrushTool; Icon: typeof IconBrush }[] = [
+  { tool: 'paint', Icon: IconBrush },
+  { tool: 'brighten', Icon: IconSun },
+  { tool: 'darken', Icon: IconMoon },
+];
+
+/** One button per brush tool, on the left edge of the 3D view. Clicking the active tool turns the brush off. */
+function BrushToolbar({ wb, disabled }: { wb: Workbench; disabled: boolean }) {
+  const { brush, brushActive } = wb;
+  return (
+    <div className="wb-brush-tools" role="toolbar" aria-orientation="vertical" aria-label={t.brush.settings}>
+      {BRUSH_TOOLS.map(({ tool, Icon }) => {
+        const on = brushActive && !disabled && brush.tool === tool;
+        return (
+          <button
+            key={tool}
+            type="button"
+            className="wb-brush-tools__btn"
+            aria-pressed={on}
+            aria-label={t.brush.tools[tool]}
+            title={disabled ? t.stage.brushFaceUpOnly : `${t.brush.tools[tool]} — ${t.brush.toolHints[tool]} (B)`}
+            disabled={disabled}
+            onClick={() => {
+              if (on && !brush.erase) {
+                wb.setBrushActive(false);
+                return;
+              }
+              wb.setBrush({ tool, erase: false });
+              wb.setBrushActive(true);
+            }}
+          >
+            <Icon size={18} />
+            {tool === 'paint' && <span className="wb-brush-tools__dot" style={{ background: wb.brushSlot?.filament.colorHex }} />}
+            {on && brush.erase && <span className="wb-brush-tools__erase" />}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

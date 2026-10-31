@@ -35,6 +35,9 @@ export const t = {
     brightness: 'Brilho',
     gamma: 'Gama',
     smoothing: 'Suavização',
+    posterize: 'Posterizar',
+    posterizeHint: 'Corta o relevo em degraus chapados (0 = desligado)',
+    colorReading: 'Leitura de cor…',
     advanced: 'Ajuste fino',
   },
 
@@ -75,6 +78,8 @@ export const t = {
     layerShort: 'cam.',
     edit: 'Editar filamento',
     remove: 'Remover',
+    replace: 'Substituir por um filamento cadastrado',
+    replaceEmpty: 'Nenhum outro filamento cadastrado',
     hide: 'Ocultar no preview (a exportação não muda)',
     show: 'Mostrar no preview',
     swapCommand: 'Comando de troca no 3MF',
@@ -131,14 +136,32 @@ export const t = {
     colorMode: 'Cores',
     showLayers: 'Camadas',
     resetView: 'Recentralizar',
+    orientation: 'Orientação de impressão',
+    faceUp: 'Face para cima',
+    faceDown: 'Face para baixo',
+    faceUpHint: 'Imagem no topo, em relevo, com trocas de filamento por camada',
+    faceDownHint: 'Imagem virada para a mesa, atrás de uma janela de filamento transparente (precisa de AMS / multimaterial)',
+    faceDownLegend: 'Face para baixo: a peça sai chapada, com a imagem lisa na face da mesa (por trás de uma camada transparente).',
+    brushFaceUpOnly: 'O pincel funciona na vista face para cima',
     computing: 'Calculando…',
   },
 
   brush: {
-    toggle: 'Pincel',
-    toggleHint: 'Pintar uma área com um filamento direto no 3D (B)',
-    hint: 'Arraste para pintar · Alt+arrastar ou botão do meio para girar · Botão direito: ajustes',
+    hint: 'Arraste para pintar · Arraste fora do modelo para girar a câmera · Alt+arrastar gira o modelo · Botão direito: arrastar move, clique abre ajustes · Alt+botão direito: arrastar muda o tamanho',
     settings: 'Pincel',
+    tool: 'Ferramenta',
+    tools: {
+      paint: 'Cor',
+      brighten: 'Clarear',
+      darken: 'Escurecer',
+    },
+    toolHints: {
+      paint: 'Pinta a área com um filamento',
+      brighten: 'Leva cada ponto para uma camada de cor mais clara',
+      darken: 'Leva cada ponto para uma camada de cor mais escura',
+    },
+    strength: 'Intensidade',
+    strengthHint: 'Quanto o brilho muda no centro do pincel, em relação à faixa entre a cor mais escura e a mais clara que a pilha imprime',
     size: 'Tamanho',
     softness: 'Suavidade',
     opacity: 'Opacidade',
@@ -168,6 +191,7 @@ export const t = {
       onDark: 'Quanto mais escura que a cor do pincel a área precisa ser para receber tinta. Suba para poupar tons próximos',
     },
     erase: 'Borracha',
+    toolChanged: (name: string) => `Pincel: ${name} (Shift+B alterna)`,
     clear: 'Limpar pintura',
   },
 
@@ -191,7 +215,24 @@ export const t = {
     saved: (app: string) => `Projeto-modelo configurado (${app})`,
   },
 
+  exportDialog: {
+    title: 'Exportar',
+    subtitle: (format: string) => `Formato ${format}. Como a imagem vai ficar na mesa de impressão?`,
+    faceUpTitle: 'Face para cima',
+    faceUpDesc: 'A imagem é o relevo no topo da peça. Um filamento por vez, com pausas para trocar: funciona em qualquer impressora.',
+    faceDownTitle: 'Face para baixo',
+    faceDownDesc:
+      'A imagem fica lisa, colada na mesa (acabamento da placa), atrás de uma janela de filamento transparente. Cada camada mistura filamentos: precisa de AMS / multimaterial.',
+    faceDownStl: 'Em STL sai um .zip com um arquivo por filamento.',
+    faceDownTemplate: 'O projeto-modelo do Bambu Studio não é aplicado face para baixo: escolha a impressora e os filamentos no slicer.',
+    cancel: 'Cancelar',
+    confirm: 'Exportar',
+  },
+
   toast: {
+    exportedFaceDown: (name: string, parts: string[]) =>
+      `${name} salvo. No slicer, atribua um filamento a cada parte, na ordem: ${parts.map((p, i) => `${i + 1} = ${p}`).join(', ')}.`,
+    clearFilament: 'Transparente',
     exporting: 'Gerando arquivo…',
     exported: (name: string) => `${name} salvo`,
     exportedNoTemplate: (name: string) =>
@@ -199,6 +240,20 @@ export const t = {
     exportFailed: 'Falha ao exportar',
     imageFailed: 'Não foi possível abrir a imagem',
     needImage: 'Carregue uma imagem primeiro',
+  },
+
+  colorPresets: {
+    title: 'Leitura de cor',
+    hint: 'Escolha como as cores da imagem viram filamentos. A prévia mostra o resultado; dá para trocar depois em Imagem.',
+    done: 'Pronto',
+    names: { faithful: 'Fiel à foto', balanced: 'Equilibrado', simple: 'Simplificado' },
+    descriptions: {
+      faithful: '6 cores no tom exato e sombreado completo',
+      balanced: '4 cores predominantes, usando seus filamentos parecidos',
+      simple: '3 cores, prefere seus filamentos e áreas chapadas com pouco sombreado',
+    },
+    summary: (matched: number, added: number) =>
+      `${matched} da biblioteca` + (added > 0 ? ` · ${added} nova${added > 1 ? 's' : ''}` : ''),
   },
 } as const;
 

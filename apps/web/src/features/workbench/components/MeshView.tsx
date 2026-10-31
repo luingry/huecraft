@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import type { PreviewResult } from '@huecraft/engine';
+import type { FaceDownPreview, PreviewResult } from '@huecraft/engine';
 
 export type MeshColorMode = 'printed' | 'slicer';
 
@@ -25,6 +25,15 @@ function toLinear(src: Float32Array): Float32Array {
   const out = new Float32Array(src.length);
   for (let i = 0; i < src.length; i++) out[i] = lut[Math.max(0, Math.min(255, Math.round(src[i] * 255)))];
   return out;
+}
+
+function disposeTree(root: THREE.Object3D): void {
+  root.traverse((o) => {
+    if (o instanceof THREE.Mesh || o instanceof THREE.LineSegments) {
+      o.geometry.dispose();
+      (o.material as THREE.Material).dispose();
+    }
+  });
 }
 
 const RING_SEGMENTS = 64;
@@ -60,6 +69,7 @@ interface Viewer {
   controls: OrbitControls;
   group: THREE.Group;
   mesh: THREE.Mesh | null;
+
   cut: { uCutZ: { value: number }; uCutColor: { value: THREE.Color } };
   cursor: { group: THREE.Group; outer: THREE.LineLoop; inner: THREE.LineLoop };
   framedFor: string;
@@ -69,11 +79,16 @@ interface Viewer {
 /**
  * Terraced 3D preview, like the slicer's layer view. `cutLayers` cuts the
  * model at the top of that layer (`maxLayerZ`) so swaps can be inspected one by one.
- * With a `brush`, left-drag paints strokes on the surface and right-click asks
- * for the brush menu; orbiting moves to the middle button or Alt + left.
+ * With a `brush`, left-drag paints strokes on the surface (Shift keeps the line
+ * straight along the model axis the drag leans to) and right-click asks
+ * for the brush menu (Alt + right drag resizes it); orbiting moves to the middle
+ * button, and Alt + left drag turns the model itself.
+ * With `faceDown` it shows the flat slab of a face-down print, image side up
+ * (no brush or layer cut there).
  */
 export function MeshView({
   result,
+  faceDown = null,
   colorMode,
   cutLayers,
   maxLayerZ,
@@ -83,8 +98,10 @@ export function MeshView({
   brush,
   onStroke,
   onBrushMenu,
+  onBrushSize,
 }: {
   result: PreviewResult;
+  faceDown?: FaceDownPreview | null;
   colorMode: MeshColorMode;
   cutLayers: number;
   maxLayerZ: number;
@@ -99,12 +116,14 @@ export function MeshView({
    */
   onStroke: (id: string, points: number[], done: boolean, sampleLayer: number) => void;
   onBrushMenu: (x: number, y: number) => void;
+  /** Alt + right drag: new brush diameter in mm. */
+  onBrushSize: (sizeMm: number) => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const viewer = useRef<Viewer | null>(null);
   // Latest props for the native event handlers, which are registered once.
-  const live = useRef({ result, brush, onStroke, onBrushMenu, layerZ, cutZ: 1e6 });
-  live.current = { ...live.current, result, brush, onStroke, onBrushMenu, layerZ };
+  const live = useRef({ result, brush, onStroke, onBrushMenu, onBrushSize, layerZ, cutZ: 1e6 });
+  live.current = { ...live.current, result, brush, onStroke, onBrushMenu, onBrushSize, layerZ };
 
   useEffect(() => {
     const mount = mountRef.current!;
@@ -135,7 +154,8 @@ export function MeshView({
     const cursor = { group: new THREE.Group(), outer: makeRing(), inner: makeRing() };
     cursor.group.add(cursor.outer, cursor.inner);
     cursor.group.visible = false;
-    scene.add(cursor.group);
+    // In the model's group, so the ring follows it when Alt + left drag turns it.
+    group.add(cursor.group);
 
     const v: Viewer = {
       renderer,
@@ -149,6 +169,9 @@ export function MeshView({
       framedFor: '',
       frame: () => {
         if (!v.mesh) return;
+        group.position.set(0, 0, 0);
+        group.quaternion.identity();
+        group.updateMatrixWorld();
         const box = new THREE.Box3().setFromObject(v.mesh);
         const size = box.getSize(new THREE.Vector3());
         const center = box.getCenter(new THREE.Vector3());
@@ -182,6 +205,7 @@ export function MeshView({
 
     const raycaster = new THREE.Raycaster();
     const ndc = new THREE.Vector2();
+    const toModel = new THREE.Matrix4();
 
     /** Ray-marches the layer field: far cheaper than raycasting a million triangles. */
     const hitTest = (clientX: number, clientY: number): Hit | null => {
@@ -189,6 +213,9 @@ export function MeshView({
       const rect = renderer.domElement.getBoundingClientRect();
       ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
       raycaster.setFromCamera(ndc, camera);
+      // March in model space, which the group may have turned.
+      group.updateMatrixWorld();
+      raycaster.ray.applyMatrix4(toModel.copy(group.matrixWorld).invert());
       const { origin: o, direction: d } = raycaster.ray;
       const W = r.sizeMm.width;
       const H = r.sizeMm.height;
@@ -251,14 +278,14 @@ export function MeshView({
       }
     };
 
-    const placeCursor = (hit: Hit | null) => {
+    const placeCursor = (hit: Hit | null, sizeMm?: number) => {
       const b = live.current.brush;
       if (!hit || !b) {
         cursor.group.visible = false;
         return;
       }
       const r = live.current.result;
-      const radius = b.sizeMm / 2;
+      const radius = (sizeMm ?? b.sizeMm) / 2;
       const inner = radius * (1 - b.softness);
       cursor.group.visible = true;
       cursor.group.position.set(hit.u * r.sizeMm.width, (1 - hit.v) * r.sizeMm.height, hit.z + 0.02);
@@ -269,7 +296,43 @@ export function MeshView({
       (cursor.inner.material as THREE.LineBasicMaterial).color.set(b.erase ? '#ff6b6b' : b.colorHex);
     };
 
-    let stroke: { id: string; points: number[]; pointerId: number; sampleLayer: number } | null = null;
+    /** Surface under an image-space point, for a hit the pointer did not land on itself. */
+    const hitAt = (u: number, v: number): Hit => {
+      const { result: r, layerZ: zOf, cutZ } = live.current;
+      const cx = Math.min(r.width - 1, Math.max(0, Math.floor(u * r.width)));
+      const cy = Math.min(r.height - 1, Math.max(0, Math.floor(v * r.height)));
+      const layer = r.layerField[cy * r.width + cx];
+      return { u, v, z: layer > 0 ? Math.min(zOf(layer - 1), cutZ) : 0, layer };
+    };
+
+    let stroke: {
+      id: string;
+      points: number[];
+      pointerId: number;
+      sampleLayer: number;
+      /**
+       * Shift held: the stroke ends in one straight segment from its point at
+       * `start` (index into `points`) along the axis the drag leans to most.
+       */
+      line: { start: number } | null;
+    } | null = null;
+
+    /** Shift drag: replaces the stroke's tail with a straight horizontal or vertical segment. */
+    const drawLine = (hit: Hit) => {
+      if (!stroke) return;
+      if (!stroke.line) stroke.line = { start: stroke.points.length - 2 };
+      const { start } = stroke.line;
+      const pts = stroke.points;
+      const fu = pts[start];
+      const fv = pts[start + 1];
+      const r = live.current.result;
+      // Re-picked on every move, so a shaky start doesn't fix the wrong axis.
+      const alongU = Math.abs(hit.u - fu) * r.sizeMm.width >= Math.abs(hit.v - fv) * r.sizeMm.height;
+      const end = alongU ? hitAt(hit.u, fv) : hitAt(fu, hit.v);
+      pts.length = start + 2;
+      pts.push(end.u, end.v);
+      placeCursor(end);      live.current.onStroke(stroke.id, pts.slice(), false, stroke.sampleLayer);
+    };
 
     const addPoint = (hit: Hit) => {
       if (!stroke) return;
@@ -286,32 +349,117 @@ export function MeshView({
     };
 
     // Capture phase on the wrapper runs before OrbitControls (on the canvas), so
-    // painting and the brush menu can swallow the events it would act on.
+    // painting can swallow the events it would act on. A left press off the model
+    // still orbits, and a right drag pans; a right click without a drag opens the menu.
+    let menuPress: { pointerId: number; x: number; y: number } | null = null;
+    // Alt + right drag resizes the brush, like Photoshop: the ring stays put and
+    // its edge follows the pointer horizontally.
+    let sizing: { pointerId: number; x: number; startSize: number; mmPerPx: number; anchor: Hit | null; size: number } | null =
+      null;
+    // Alt + left drag turns the model itself about its centre: horizontal spins it
+    // about the vertical axis, vertical tips it towards or away from the camera.
+    // The orientation comes from the drag's total offset, not from summed steps, so
+    // circling the pointer never builds up a roll about the view axis.
+    let turning: {
+      pointerId: number;
+      x: number;
+      y: number;
+      base: THREE.Quaternion;
+      tipAxis: THREE.Vector3;
+    } | null = null;
+    const zAxis = new THREE.Vector3(0, 0, 1);
+    const spin = new THREE.Quaternion();
+    const turnModel = (dx: number, dy: number) => {
+      if (!turning) return;
+      const r = live.current.result;
+      const center = new THREE.Vector3(r.sizeMm.width / 2, r.sizeMm.height / 2, r.sizeMm.z / 2);
+      const pivot = group.localToWorld(center.clone());
+      // Same rate as OrbitControls: a full turn per viewport height.
+      const k = (2 * Math.PI) / Math.max(1, renderer.domElement.clientHeight);
+      group.quaternion.copy(turning.base);
+      group.quaternion.premultiply(spin.setFromAxisAngle(zAxis, dx * k));
+      group.quaternion.premultiply(spin.setFromAxisAngle(turning.tipAxis, dy * k));
+      // Keep the centre where it was.
+      group.position.copy(pivot).sub(center.applyQuaternion(group.quaternion));
+      group.updateMatrixWorld();
+    };
     const onPointerDown = (e: PointerEvent) => {
-      if (!live.current.brush || spaceHeld) return;
-      if (e.button === 2) {
+      const b = live.current.brush;
+      if (!b || spaceHeld) return;
+      if (e.button === 2 && e.altKey) {
         e.stopPropagation();
+        mount.setPointerCapture(e.pointerId);
+        const anchor = hitTest(e.clientX, e.clientY);
+        const r = live.current.result;
+        const at = anchor
+          ? group.localToWorld(new THREE.Vector3(anchor.u * r.sizeMm.width, (1 - anchor.v) * r.sizeMm.height, anchor.z))
+          : controls.target;
+        // World mm covered by one screen pixel at the anchor's depth.
+        const fovSpan = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * camera.position.distanceTo(at);
+        const mmPerPx = fovSpan / Math.max(1, renderer.domElement.clientHeight);
+        sizing = { pointerId: e.pointerId, x: e.clientX, startSize: b.sizeMm, mmPerPx, anchor, size: b.sizeMm };
         return;
       }
-      if (e.button !== 0 || e.altKey) return;
-      e.stopPropagation();
+      if (e.button === 2) {
+        menuPress = { pointerId: e.pointerId, x: e.clientX, y: e.clientY };
+        return;
+      }
+      if (e.button === 0 && e.altKey) {
+        e.stopPropagation();
+        mount.setPointerCapture(e.pointerId);
+        cursor.group.visible = false;
+        turning = {
+          pointerId: e.pointerId,
+          x: e.clientX,
+          y: e.clientY,
+          base: group.quaternion.clone(),
+          tipAxis: new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0),
+        };
+        return;
+      }
+      if (e.button !== 0) return;
       const hit = hitTest(e.clientX, e.clientY);
       if (!hit) return;
+      e.stopPropagation();
       mount.setPointerCapture(e.pointerId);
-      stroke = { id: crypto.randomUUID(), points: [], pointerId: e.pointerId, sampleLayer: hit.layer };
+      stroke = { id: crypto.randomUUID(), points: [], pointerId: e.pointerId, sampleLayer: hit.layer, line: null };
       addPoint(hit);
     };
     const onPointerMove = (e: PointerEvent) => {
       if (!live.current.brush) return;
+      if (sizing && sizing.pointerId === e.pointerId) {
+        // Dragging moves the ring's edge, so the diameter changes twice as fast.
+        const size = sizing.startSize + (e.clientX - sizing.x) * sizing.mmPerPx * 2;
+        sizing.size = Math.round(Math.min(200, Math.max(0.2, size)) * 10) / 10;
+        placeCursor(sizing.anchor, sizing.size);
+        live.current.onBrushSize(sizing.size);
+        return;
+      }
+      if (turning && turning.pointerId === e.pointerId) {
+        turnModel(e.clientX - turning.x, e.clientY - turning.y);
+        return;
+      }
       if (spaceHeld && !stroke) {
         cursor.group.visible = false;
         return;
       }
       const hit = hitTest(e.clientX, e.clientY);
+      if (stroke && stroke.pointerId === e.pointerId && hit) {
+        if (e.shiftKey) return drawLine(hit);
+        // Letting go of Shift carries on freehand from the line's end.
+        stroke.line = null;
+      }
       placeCursor(hit);
       if (stroke && stroke.pointerId === e.pointerId && hit) addPoint(hit);
     };
     const endStroke = (e: PointerEvent) => {
+      if (sizing && sizing.pointerId === e.pointerId) sizing = null;
+      if (turning && turning.pointerId === e.pointerId) turning = null;
+      if (menuPress && menuPress.pointerId === e.pointerId) {
+        const clicked = e.type === 'pointerup' && Math.hypot(e.clientX - menuPress.x, e.clientY - menuPress.y) < 4;
+        menuPress = null;
+        if (clicked && live.current.brush) live.current.onBrushMenu(e.clientX, e.clientY);
+      }
       if (!stroke || stroke.pointerId !== e.pointerId) return;
       live.current.onStroke(stroke.id, stroke.points.slice(), true, stroke.sampleLayer);
       stroke = null;
@@ -353,11 +501,11 @@ export function MeshView({
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
     mount.addEventListener('pointerenter', onEnter);
+    // The menu opens on pointerup instead (see endStroke), so a right drag can pan.
     const onContextMenu = (e: MouseEvent) => {
       if (!live.current.brush) return;
       e.preventDefault();
       e.stopPropagation();
-      live.current.onBrushMenu(e.clientX, e.clientY);
     };
     mount.addEventListener('pointerdown', onPointerDown, true);
     mount.addEventListener('pointermove', onPointerMove);
@@ -388,10 +536,7 @@ export function MeshView({
       cancelAnimationFrame(raf);
       ro.disconnect();
       controls.dispose();
-      if (v.mesh) {
-        v.mesh.geometry.dispose();
-        (v.mesh.material as THREE.Material).dispose();
-      }
+      if (v.mesh) disposeTree(v.mesh);
       for (const ring of [cursor.outer, cursor.inner]) {
         ring.geometry.dispose();
         (ring.material as THREE.Material).dispose();
@@ -408,7 +553,7 @@ export function MeshView({
     if (!v) return;
     const m = result.mesh;
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
+    geo.setAttribute('position', new THREE.BufferAttribute(faceDown ? faceDown.positions : m.positions, 3));
     geo.setAttribute(
       'color',
       new THREE.BufferAttribute(toLinear(colorMode === 'printed' ? m.printedColors : m.slicerColors), 3),
@@ -451,7 +596,7 @@ export function MeshView({
       v.framedFor = key;
       v.frame();
     }
-  }, [result, colorMode]);
+  }, [result, colorMode, faceDown]);
 
   useEffect(() => {
     const v = viewer.current;
@@ -473,8 +618,7 @@ export function MeshView({
     if (resetToken > 0) viewer.current?.frame();
   }, [resetToken]);
 
-  // Brush mode: the left button paints, so orbiting moves to the middle button
-  // (Alt + left also orbits: the capture handler lets it through).
+  // Brush mode: the left button paints, so orbiting moves to the middle button.
   const brushOn = brush !== null;
   useEffect(() => {
     const v = viewer.current;

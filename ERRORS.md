@@ -35,3 +35,22 @@
 - **Symptom:** in sampled mode, small areas showing the clicked colour are not painted even when aimed at exactly. Similar colours elsewhere paint fine.
 - **Cause:** with "Simular largura de linha" on, the view shows the average of each line-width block of pixels. The sample came from that displayed block, but the blend tested each raw pixel. In detailed areas, few or none of the raw pixels are at the displayed layer.
 - **Fix:** `PaintContext.cell` (the line-width block size in pixels). Colour blends now judge each block by the layer it shows, computed from the surface before the stroke. The export receives `simulateLineWidth` so it makes the same decision as the preview.
+
+## Generic mesh simplifiers break the exported relief
+
+- **Symptom:** running meshoptimizer (`simplify`, `LockBorder` + `ErrorAbsolute`, error ≈ 0.01 mm) on the export's top surface gave ~55 % fewer triangles, but ~14 000 triangles faced down in XY (folds/overhangs on the steep layer ramps), a few non-manifold edges, and took 6.5 s on 3 M triangles.
+- **Cause:** QEM edge collapse measures 3D distance only; on near-vertical one-sample ramps between plateaus a collapse can fold the sheet without exceeding the error. It knows nothing about the surface being a heightfield.
+- **Fix:** the export top is an RTIN (`buildSolidHeightfieldMesh` in `packages/mesh`): lossless, crack-free by construction, always a heightfield. Do not add a generic simplifier after it without an XY-orientation and manifold check.
+
+## Terrace mesh not watertight after earcut (T-junctions on collinear points)
+
+- **Symptom:** `buildTerracedSolidMesh` failed `checkWatertight` on a few random fields: open edges forming a zero-area triangle such as (1, 5.5)–(1.5, 5.5)–(2, 5.5) on one face.
+- **Cause:** contour points of *different* loops of a face can be exactly collinear (e.g. level-4 and level-5 crossings at the same half-cell row). earcut treats "touching" as non-intersecting and ran a diagonal straight through the middle point, leaving a T-junction. Separately, earcut drops collinear points on straight border runs, which also leaves T-junctions against the walls.
+- **Fix:** earcut runs on coordinates nudged by ±1e-8 mm (deterministic), so a vertex on a diagonal becomes a zero-area triangle that still shares its edges. Any boundary point earcut still drops is put back by splitting the triangle on the edge spanning it. Do not filter zero-area triangles afterwards: they are part of the conforming mesh.
+
+## Bambu Studio merges multi-material parts written as Prusa volumes
+
+- **Symptom:** the face-down 3MF (one mesh, `Metadata/Slic3r_PE_model.config` with `<volume firstid lastid>` + `extruder` per range) slices in Bambu Studio with everything on filament 1; re-exported from the CLI it holds a single part.
+- **Cause:** Bambu Studio ignores Prusa volume ranges (and a copy of them in `model_settings.config`) for non-Bambu 3MFs, so the overlapping shells load as one part. Adding a Bambu-style `model_settings.config` with `<part ... extruder>` to an untagged 3MF crashed the CLI (segfault), like the partial-config crash above.
+- **Fix:** write each part as its own `<object>` and assemble them with a `<components>` object (3MF core). Bambu Studio loads that as one object with one part per component (checked with `--export-3mf`); filaments are assigned per part in the slicer (part order is 1 = clear, then colours front to back). Bambu names parts after the parent object, so the order is shown in the export toast.
+- **Check:** `bambu-studio.exe --load-settings "m.json;p.json" --load-filaments "f.json;…" --outputdir out --export-3mf re.3mf in.3mf`, then look at the `<part>` entries in `Metadata/model_settings.config` of `re.3mf`. The CLI may keep running after writing output: kill only the process it started.

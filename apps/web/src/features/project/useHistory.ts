@@ -17,10 +17,11 @@ export function useHistory<T>(initial: () => T) {
   const [h, setH] = useState<HistoryState<T>>(() => ({ past: [], present: initial(), future: [] }));
   const last = useRef<{ key: string | null; at: number }>({ key: null, at: 0 });
 
-  const set = useCallback((updater: (prev: T) => T, coalesceKey?: string) => {
+  /** `merge` folds the update into the current step (follow-ups the user never sees as their own action). */
+  const set = useCallback((updater: (prev: T) => T, coalesceKey?: string, merge = false) => {
     const now = performance.now();
     const coalesce =
-      coalesceKey !== undefined && last.current.key === coalesceKey && now - last.current.at < COALESCE_MS;
+      merge || (coalesceKey !== undefined && last.current.key === coalesceKey && now - last.current.at < COALESCE_MS);
     last.current = { key: coalesceKey ?? null, at: now };
     setH((prev) => {
       const next = updater(prev.present);

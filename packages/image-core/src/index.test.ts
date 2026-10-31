@@ -75,6 +75,12 @@ describe('reliefField', () => {
     expect(hi[2]).toBe(1);
   });
 
+  it('posterizes into flat steps', () => {
+    const img = gray(64, 1, (x) => Math.round((x / 63) * 255));
+    const t = reliefField(extractLumaAlpha(img), { ...DEFAULT_RELIEF, posterize: 3 });
+    expect(new Set(Array.from(t, (v) => Math.round(v * 1000) / 1000))).toEqual(new Set([0, 0.5, 1]));
+  });
+
   it('treats transparent pixels as base (t = 0), even when inverted', () => {
     const img = gray(4, 1, () => 0, 0);
     const t = reliefField(extractLumaAlpha(img), { ...DEFAULT_RELIEF, invert: true });

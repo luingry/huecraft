@@ -7,6 +7,7 @@ import {
   type HueCraftProject,
   type PaintBlend,
   type PaintStroke,
+  type PrintOrientation,
   type PrintParams,
   type ReliefParams,
   type StackEntry,
@@ -31,6 +32,12 @@ import {
 import { readSlicerProjectTemplate } from '@huecraft/exporters';
 import { useHistory } from '../project/useHistory';
 import { createSlot, normalizeStack, sortStack } from './stack';
+import {
+  DEFAULT_COLOR_PRESET,
+  readColorPresets,
+  type ColorPresetId,
+  type ColorPresetResult,
+} from './autoColors';
 import { useEngine } from './useEngine';
 
 export type ProfileMode = 'basic' | 'advanced';
@@ -43,13 +50,25 @@ export interface Toast {
 }
 
 const PREVIEW_MAX_EDGE = 640;
+
+/** Slots for a colour reading; the starts are placeholders until auto-distribute runs. */
+function presetStack(r: ColorPresetResult): StackEntry[] {
+  return r.picks.map((p, i) => createSlot(p.filament, i * 8));
+}
+
+/** What the brush does: paint a filament, or lighten / darken the colours under it. */
+export type BrushTool = 'paint' | 'brighten' | 'darken';
+
 export interface BrushSettings {
+  tool: BrushTool;
   /** Diameter in mm on the model. */
   sizeMm: number;
   /** 0..1, 0 = hard edge. */
   softness: number;
   /** 0..1 */
   opacity: number;
+  /** Brighten / darken amount, 0..1 of the printable luminance range. */
+  toneStrength: number;
   erase: boolean;
   blend: PaintBlend;
   /** Tolerance per colour blend, 0..1 (see PaintStroke.tolerance). */
@@ -66,9 +85,11 @@ export function isColorBlend(b: PaintBlend): b is ColorBlend {
 }
 
 const DEFAULT_BRUSH: BrushSettings = {
+  tool: 'paint',
   sizeMm: 6,
   softness: 0.5,
   opacity: 1,
+  toneStrength: 0.3,
   erase: false,
   blend: 'normal',
   tolerances: { sampled: 0.15, onLight: 0, onDark: 0 },
@@ -142,6 +163,19 @@ export function formatSwapPlanText(project: HueCraftProject, result: PreviewResu
   return lines.join('\r\n') + '\r\n';
 }
 
+/** Filament of each part of a face-down export, in part order (clear first, then front to back, as the engine builds them). */
+function faceDownPartOrder(stack: StackEntry[]): string[] {
+  const names: string[] = [t.toast.clearFilament];
+  const seen = new Set<string>();
+  for (const e of [...sortStack(stack)].reverse()) {
+    const key = `${e.filament.colorHex.toLowerCase()}|${e.filament.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(e.filament.name);
+  }
+  return names;
+}
+
 export function useWorkbench() {
   const history = useHistory<HueCraftProject>(() => newProject());
   const project = history.state;
@@ -156,6 +190,12 @@ export function useWorkbench() {
     readPref('huecraft:profile') === 'advanced' ? 'advanced' : 'basic',
   );
   const [simulateLineWidth, setSimulateLineWidthState] = useState(() => readPref('huecraft:line-sim') !== '0');
+  // How the 3D view shows the print; also the choice pre-selected when exporting.
+  const [orientation, setOrientationState] = useState<PrintOrientation>(() =>
+    readPref('huecraft:orientation') === 'faceDown' ? 'faceDown' : 'faceUp',
+  );
+  // 3MF / STL export waiting for the orientation question.
+  const [exportRequest, setExportRequest] = useState<'3mf' | 'stl' | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [toast, setToast] = useState<Toast | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -166,7 +206,10 @@ export function useWorkbench() {
   const [brush, setBrushState] = useState<BrushSettings>(readBrush);
   // Stroke being drawn: previewed live, committed to the project (one undo step) on release.
   const [liveStroke, setLiveStroke] = useState<PaintStroke | null>(null);
+  // Colour-reading picker: shown after an image is opened, reopenable from the image section.
+  const [colorPresetsOpen, setColorPresetsOpen] = useState(false);
   const autoDistributePending = useRef(false);
+  const readFromImageId = useRef<string | null>(null);
   const booted = useRef(false);
 
   const totalLayers = totalLayerCount(project.print);
@@ -236,8 +279,12 @@ export function useWorkbench() {
     setHiddenSlots((h) => (h.includes(slotId) ? h.filter((s) => s !== slotId) : [...h, slotId]));
   }, []);
 
-  // A different project has different slots.
-  useEffect(() => setHiddenSlots([]), [project.id]);
+  // A different project has different slots; the colour picker stays open only
+  // for a project just created from an image (openImageFile opens it).
+  useEffect(() => {
+    setHiddenSlots([]);
+    if (project.id !== readFromImageId.current) setColorPresetsOpen(false);
+  }, [project.id]);
 
   // Strokes follow their filament's band; resolved against the full stack so
   // hiding a colour in the preview does not move the paint.
@@ -269,12 +316,14 @@ export function useWorkbench() {
   useEffect(() => {
     if (!result || !autoDistributePending.current) return;
     autoDistributePending.current = false;
+    // Part of the import / preset step: undo goes straight back to before it.
     setProject(
       (p) => ({
         ...p,
         stack: autoDistributeStack(p.stack, result.layerHistogram, result.baseLayers, result.totalLayers),
       }),
       'auto-distribute',
+      true,
     );
   }, [result, setProject]);
 
@@ -348,6 +397,19 @@ export function useWorkbench() {
   /** Builds a stroke from the current brush settings for the given points. */
   const makeStroke = useCallback(
     (id: string, points: number[], sampleLayer: number): PaintStroke | null => {
+      const tone = !brush.erase && brush.tool !== 'paint';
+      if (tone) {
+        return {
+          id,
+          mode: brush.tool,
+          slotId: '',
+          layer: totalLayers,
+          radius: brush.sizeMm / 2 / project.print.widthMm,
+          softness: brush.softness,
+          opacity: brush.toneStrength,
+          points,
+        };
+      }
       if (!brushSlot && !brush.erase) return null;
       return {
         id,
@@ -392,6 +454,41 @@ export function useWorkbench() {
     );
   }, [result, updateStack]);
 
+  const colorPresets = useMemo(
+    () => (colorPresetsOpen && image ? readColorPresets(image.source, library, project.relief.invert) : null),
+    [colorPresetsOpen, image, library, project.relief.invert],
+  );
+
+  // The current reading is whichever preset the project still matches, so undo
+  // and manual edits keep the picker honest.
+  const colorPresetId = useMemo<ColorPresetId | null>(() => {
+    const colors = sortStack(project.stack).map((e) => e.filament.colorHex.toLowerCase()).join();
+    const r = colorPresets?.find(
+      ({ preset, picks }) =>
+        picks.map((p) => p.filament.colorHex.toLowerCase()).join() === colors &&
+        preset.relief.smoothing === project.relief.smoothing &&
+        preset.relief.posterize === project.relief.posterize,
+    );
+    return r?.preset.id ?? null;
+  }, [colorPresets, project.stack, project.relief.smoothing, project.relief.posterize]);
+
+  const applyColorPreset = useCallback(
+    (id: ColorPresetId) => {
+      const r = colorPresets?.find((c) => c.preset.id === id);
+      if (!r || r.picks.length === 0) return;
+      autoDistributePending.current = true;
+      setProject(
+        (p) => ({ ...p, relief: { ...p.relief, ...r.preset.relief }, stack: normalizeStack(presetStack(r)) }),
+        'color-preset',
+      );
+    },
+    [colorPresets, setProject],
+  );
+
+  const openColorPresets = useCallback(() => {
+    if (image) setColorPresetsOpen(true);
+  }, [image]);
+
   const openImageFile = useCallback(
     async (file: File) => {
       if (!file.type.startsWith('image/')) {
@@ -400,17 +497,25 @@ export function useWorkbench() {
       }
       try {
         const loaded = await decodeImage(file);
+        // The image's predominant colours become the stack (default preset); the
+        // picker opens so another reading can be chosen.
+        const presets = readColorPresets(loaded.source, library, project.relief.invert);
+        const chosen = presets.find((r) => r.preset.id === DEFAULT_COLOR_PRESET)!;
+        const autoStack = presetStack(chosen);
         // A new image becomes a new project that inherits the current settings.
         const now = new Date().toISOString();
+        const id = crypto.randomUUID();
+        if (autoStack.length > 0) readFromImageId.current = id;
         resetHistory({
           ...project,
-          id: crypto.randomUUID(),
+          id,
           name: stripExtension(file.name),
           createdAt: now,
           updatedAt: now,
           imageWidth: loaded.source.width,
           imageHeight: loaded.source.height,
-          stack: project.stack.length > 0 ? project.stack : defaultStack(library),
+          relief: autoStack.length > 0 ? { ...project.relief, ...chosen.preset.relief } : project.relief,
+          stack: autoStack.length > 0 ? autoStack : project.stack.length > 0 ? project.stack : defaultStack(library),
           // Paint belongs to the old image.
           paint: [],
         });
@@ -420,6 +525,7 @@ export function useWorkbench() {
         });
         setImageBlob(file);
         autoDistributePending.current = true;
+        if (autoStack.length > 0) setColorPresetsOpen(true);
       } catch {
         showToast(t.toast.imageFailed, 'error');
       }
@@ -460,13 +566,18 @@ export function useWorkbench() {
     writePref('huecraft:line-sim', v ? '1' : '0');
   }, []);
 
+  const setOrientation = useCallback((o: PrintOrientation) => {
+    setOrientationState(o);
+    writePref('huecraft:orientation', o);
+  }, []);
+
   const savePrinterDefaults = useCallback(() => {
     writePrinterDefaults({ print: project.print, swapCommand: project.export.swapCommand });
     showToast(t.size.defaultsSaved);
   }, [project.print, project.export.swapCommand, showToast]);
 
   const exportFile = useCallback(
-    async (kind: ExportKind) => {
+    async (kind: ExportKind, orient: PrintOrientation = 'faceUp') => {
       if (!image || !result || !engine.client) {
         showToast(t.toast.needImage, 'error');
         return;
@@ -488,11 +599,13 @@ export function useWorkbench() {
           format: kind,
           paint: resolvedPaint,
           simulateLineWidth,
-          slicerTemplate: kind === '3mf' ? slicerTemplate?.bytes : undefined,
+          slicerTemplate: kind === '3mf' && orient === 'faceUp' ? slicerTemplate?.bytes : undefined,
+          orientation: orient,
         });
-        const fileName = `${base}.${kind}`;
+        const fileName = orient === 'faceDown' ? `${base} (face down).${kind === 'stl' ? 'zip' : kind}` : `${base}.${kind}`;
         const saved = await saveFile(res.bytes, fileName, res.mimeType);
         if (!saved) setToast(null);
+        else if (orient === 'faceDown') showToast(t.toast.exportedFaceDown(fileName, faceDownPartOrder(project.stack)), 'info', true);
         else if (kind === '3mf' && result.swaps.length > 0 && !res.slicerProject)
           showToast(t.toast.exportedNoTemplate(fileName), 'info', true);
         else showToast(t.toast.exported(fileName));
@@ -503,6 +616,26 @@ export function useWorkbench() {
       }
     },
     [image, result, project, engine.client, slicerTemplate, showToast, resolvedPaint, simulateLineWidth],
+  );
+
+  /** 3MF / STL first ask for the orientation (ExportDialog); the swap plan saves right away. */
+  const requestExport = useCallback(
+    (kind: ExportKind) => {
+      if (kind === 'txt') void exportFile('txt');
+      else if (!image || !result) showToast(t.toast.needImage, 'error');
+      else setExportRequest(kind);
+    },
+    [exportFile, image, result, showToast],
+  );
+
+  const confirmExport = useCallback(
+    (orient: PrintOrientation) => {
+      const kind = exportRequest;
+      setExportRequest(null);
+      setOrientation(orient);
+      if (kind) void exportFile(kind, orient);
+    },
+    [exportRequest, exportFile, setOrientation],
   );
 
   const chooseSlicerTemplate = useCallback(
@@ -564,6 +697,12 @@ export function useWorkbench() {
     paintStroke,
     clearPaint,
     openImageFile,
+    colorPresets,
+    colorPresetId,
+    colorPresetsOpen,
+    openColorPresets,
+    closeColorPresets: () => setColorPresetsOpen(false),
+    applyColorPreset,
     newBlankProject,
     openProject,
     saveFilamentToLibrary,
@@ -571,9 +710,16 @@ export function useWorkbench() {
     setSimulateLineWidth,
     savePrinterDefaults,
     exportFile,
+    exportRequest,
+    requestExport,
+    confirmExport,
+    cancelExport: () => setExportRequest(null),
+    orientation,
+    setOrientation,
     slicerTemplate,
     chooseSlicerTemplate,
     dismissToast: () => setToast(null),
+    showToast,
   };
 }
 

@@ -120,6 +120,7 @@ export const IconSun = make(
     <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
   </>,
 );
+export const IconMoon = make(<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />);
 export const IconBrush = make(
   <>
     <path d="M19 3 9.5 12.5" />
@@ -128,6 +129,12 @@ export const IconBrush = make(
   </>,
 );
 export const IconCheck = make(<path d="m5 12 5 5 9-10" />);
+export const IconSwap = make(
+  <>
+    <path d="M4 8h14l-4-4" />
+    <path d="M20 16H6l4 4" />
+  </>,
+);
 export const IconEye = make(
   <>
     <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" />

@@ -8,6 +8,7 @@ import {
   IconEyeOff,
   IconGrip,
   IconPlus,
+  IconSwap,
   IconTrash,
   IconWand,
   Menu,
@@ -29,6 +30,7 @@ import {
   setStartLayer,
   sortStack,
   swapFilaments,
+  toStackFilament,
   topReachedLayer,
 } from '../stack';
 import type { Workbench } from '../useWorkbench';
@@ -279,6 +281,21 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
                   >
                     {hidden ? <IconEyeOff size={14} /> : <IconEye size={14} />}
                   </IconButton>
+                  <Menu
+                    trigger={({ open, toggle }) => (
+                      <IconButton label={t.stack.replace} aria-expanded={open} onClick={toggle}>
+                        <IconSwap size={14} />
+                      </IconButton>
+                    )}
+                  >
+                    {(close) => (
+                      <ReplacePicker
+                        current={entry.filament}
+                        library={wb.library}
+                        onPick={(f) => (close(), wb.updateStack((s) => replaceFilament(s, entry.slotId, toStackFilament(f))))}
+                      />
+                    )}
+                  </Menu>
                   <IconButton
                     label={t.stack.remove}
                     danger
@@ -593,6 +610,38 @@ function StackBar({
       )}
       <span className="wb-stackbar__cap wb-stackbar__cap--top" aria-hidden>{total}</span>
       <span className="wb-stackbar__cap wb-stackbar__cap--bottom" aria-hidden>1</span>
+    </div>
+  );
+}
+
+/** Library filaments to put in a slot instead of its current one; the slot keeps its layer range. */
+function ReplacePicker({
+  current,
+  library,
+  onPick,
+}: {
+  current: StackFilament;
+  library: FilamentRecord[];
+  onPick: (f: FilamentRecord) => void;
+}) {
+  const options = library.filter((f) => f.id !== current.libraryId);
+  return (
+    <div className="wb-library-menu">
+      <div className="hc-menu__label">{t.stack.library}</div>
+      {options.length === 0 ? (
+        <div className="hc-menu__label">{t.stack.replaceEmpty}</div>
+      ) : (
+        options.map((f) => (
+          <MenuItem
+            key={f.id}
+            icon={<span className="wb-swatch wb-swatch--sm" style={{ background: f.colorHex }} />}
+            hint={`${f.brand ? `${f.brand} · ` : ''}${t.stack.td} ${formatMm(f.tdMm)} mm`}
+            onClick={() => onPick(f)}
+          >
+            {f.name}
+          </MenuItem>
+        ))
+      )}
     </div>
   );
 }

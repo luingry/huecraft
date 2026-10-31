@@ -1,4 +1,4 @@
-import type { PaintStroke, PrintParams, ReliefParams, StackEntry, SwapCommand } from '@huecraft/project-schema';
+import type { PaintStroke, PrintOrientation, PrintParams, ReliefParams, StackEntry, SwapCommand } from '@huecraft/project-schema';
 
 /** Source image kept resident inside the worker. Sent once per import. */
 export interface SourceImage {
@@ -75,6 +75,12 @@ export interface ExportRequestParams {
   stack: StackEntry[];
   swapCommand: SwapCommand;
   format: '3mf' | 'stl';
+  /**
+   * 'faceDown': turned over with a clear filler, one part per filament (see
+   * faceDown.ts). The 3MF then carries no swaps or slicer template, and the STL
+   * becomes a zip with one file per filament. Missing = 'faceUp'.
+   */
+  orientation?: PrintOrientation;
   /** Brush strokes with their target layer already resolved (see resolvePaintLayers). */
   paint?: PaintStroke[];
   /** The preview simulated the line width: colour blends judge line-width blocks, as they were shown. */

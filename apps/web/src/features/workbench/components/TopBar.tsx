@@ -108,7 +108,7 @@ export function TopBar({ wb, onPickImage }: { wb: Workbench; onPickImage: () => 
       <Menu
         trigger={({ toggle }) => (
           <div className="hc-split">
-            <Button variant="primary" onClick={() => wb.exportFile('3mf')} disabled={!hasResult || wb.exporting}>
+            <Button variant="primary" onClick={() => wb.requestExport('3mf')} disabled={!hasResult || wb.exporting}>
               <IconDownload />
               {t.topbar.export3mf}
             </Button>
@@ -120,13 +120,13 @@ export function TopBar({ wb, onPickImage }: { wb: Workbench; onPickImage: () => 
       >
         {(close) => (
           <>
-            <MenuItem icon={<IconLayers />} hint={t.topbar.export3mfHint} onClick={() => (close(), wb.exportFile('3mf'))}>
+            <MenuItem icon={<IconLayers />} hint={t.topbar.export3mfHint} onClick={() => (close(), wb.requestExport('3mf'))}>
               3MF
             </MenuItem>
-            <MenuItem icon={<IconFile />} hint={t.topbar.exportStlHint} onClick={() => (close(), wb.exportFile('stl'))}>
+            <MenuItem icon={<IconFile />} hint={t.topbar.exportStlHint} onClick={() => (close(), wb.requestExport('stl'))}>
               {t.topbar.exportStl}
             </MenuItem>
-            <MenuItem icon={<IconFile />} hint={t.topbar.exportSwapsHint} onClick={() => (close(), wb.exportFile('txt'))}>
+            <MenuItem icon={<IconFile />} hint={t.topbar.exportSwapsHint} onClick={() => (close(), wb.requestExport('txt'))}>
               {t.topbar.exportSwaps}
             </MenuItem>
           </>

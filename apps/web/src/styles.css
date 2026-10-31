@@ -320,6 +320,33 @@ button.wb-swatch:hover { transform: scale(1.06); }
 .wb-callout .hc-btn { margin-top: 4px; }
 .hc-toast { max-width: min(560px, calc(100vw - 32px)); }
 
+/* ---------- Colour reading presets ---------- */
+.wb-presets {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 110;
+  width: min(720px, calc(100vw - 32px)); padding: 14px; border-radius: var(--r-lg);
+  display: flex; flex-direction: column; gap: 12px;
+  background: var(--surface); box-shadow: 0 0 0 1px var(--line-strong), 0 16px 40px rgba(0,0,0,0.5);
+  animation: hc-pop-in 180ms var(--ease);
+}
+.wb-presets__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; font-size: 12px; }
+.wb-presets__title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.wb-presets__cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.wb-presets__card {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 12px; text-align: left;
+  border: 0; border-radius: var(--r-md); background: var(--raised); color: var(--text-2); font: inherit; font-size: 12px;
+  cursor: pointer; box-shadow: inset 0 0 0 1px var(--line); transition: background var(--fast), box-shadow var(--fast);
+}
+.wb-presets__card:hover:not(:disabled) { background: var(--hover); }
+.wb-presets__card:focus-visible { outline: none; box-shadow: var(--focus); }
+.wb-presets__card[aria-pressed="true"] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.wb-presets__card:disabled { opacity: 0.5; cursor: default; }
+.wb-presets__name { font-size: 13px; font-weight: 600; color: var(--text); }
+.wb-presets__swatches { display: flex; gap: 4px; }
+.wb-presets__swatch { width: 22px; height: 22px; border-radius: 6px; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.15); }
+/* Colours not in the library get a dashed ring. */
+.wb-presets__swatch[data-new="true"] { outline: 1px dashed var(--text-3); outline-offset: 1px; }
+.wb-presets__desc { line-height: 1.35; }
+
 /* ---------- Brush ---------- */
 .wb-mesh[data-brush="true"] { cursor: crosshair; }
 .wb-mesh[data-pan="true"] { cursor: grab; }
@@ -330,8 +357,26 @@ button.wb-swatch:hover { transform: scale(1.06); }
   background: rgba(20,20,20,0.72); backdrop-filter: blur(8px); box-shadow: 0 0 0 1px var(--line);
   animation: hc-fade-in 160ms var(--ease);
 }
-.wb-brush-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent); }
-.wb-brush-btn .wb-swatch { margin-left: 2px; }
+.wb-brush-tools {
+  position: absolute; left: 14px; top: 50%; transform: translateY(-50%); z-index: 3;
+  display: flex; flex-direction: column; gap: 4px; padding: 6px; border-radius: var(--r-md);
+  background: rgba(20,20,20,0.72); backdrop-filter: blur(8px); box-shadow: 0 0 0 1px var(--line);
+}
+.wb-brush-tools__btn {
+  position: relative; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0;
+  border-radius: var(--r-sm, 6px); background: transparent; color: var(--text-2); cursor: pointer;
+  transition: background var(--fast), color var(--fast), box-shadow var(--fast);
+}
+.wb-brush-tools__btn:hover:not(:disabled) { background: rgba(255,255,255,0.06); color: var(--text); }
+.wb-brush-tools__btn:focus-visible { outline: none; box-shadow: var(--focus); }
+.wb-brush-tools__btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent); }
+.wb-brush-tools__btn:disabled { opacity: 0.4; cursor: default; }
+.wb-brush-tools__dot {
+  position: absolute; right: 6px; bottom: 6px; width: 8px; height: 8px; border-radius: 50%;
+  box-shadow: 0 0 0 1.5px rgba(20,20,20,0.9), inset 0 0 0 1px rgba(255,255,255,0.2);
+}
+/* Eraser on: a red dashed ring over the active tool. */
+.wb-brush-tools__erase { position: absolute; inset: 3px; border-radius: inherit; outline: 1px dashed #ff6b6b; pointer-events: none; }
 .wb-brush-menu { position: fixed; width: 280px; max-height: calc(100vh - 16px); overflow-y: auto; transform-origin: top left; }
 .hc-seg.wb-brush-menu__blends { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
 .wb-brush-menu__blends .hc-seg__item { justify-content: center; white-space: nowrap; }
@@ -343,3 +388,23 @@ button.wb-swatch:hover { transform: scale(1.06); }
 }
 .wb-brush-menu__swatch:hover { transform: scale(1.1); }
 .wb-brush-menu__swatch[aria-pressed="true"] { box-shadow: 0 0 0 2px #262626, 0 0 0 4px var(--text); }
+
+/* Print orientation: export question and 3D legend */
+.wb-orient { display: flex; flex-direction: column; gap: 8px; }
+.wb-orient__card {
+  display: flex; gap: 12px; align-items: center; text-align: left; padding: 10px 12px;
+  border: 0; border-radius: var(--r-md); background: var(--surface-2, rgba(255,255,255,0.03)); color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; font: inherit;
+}
+.wb-orient__card:hover { box-shadow: inset 0 0 0 1px var(--line-strong); }
+.wb-orient__card[aria-checked="true"] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+.wb-orient__glyph { flex: none; width: 64px; height: 40px; color: var(--text-2); }
+.wb-orient__text { display: flex; flex-direction: column; gap: 3px; }
+.wb-orient__title { font-weight: 600; font-size: 13px; }
+.wb-orient__desc { font-size: 12px; color: var(--text-2); line-height: 1.4; }
+.wb-orient__note { margin: 0; font-size: 12px; color: var(--text-3); line-height: 1.4; }
+.wb-orient-legend {
+  position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 3; pointer-events: none;
+  max-width: min(560px, calc(100% - 32px)); padding: 5px 12px; border-radius: 14px; font-size: 11px; text-align: center;
+  color: var(--text-2); background: rgba(20,20,20,0.72); backdrop-filter: blur(8px); box-shadow: 0 0 0 1px var(--line);
+}

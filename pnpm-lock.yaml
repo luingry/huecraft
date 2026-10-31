@@ -154,6 +154,9 @@ importers:
       '@huecraft/image-core':
         specifier: workspace:*
         version: link:../image-core
+      earcut:
+        specifier: 3.2.4
+        version: 3.2.4
     devDependencies:
       typescript:
         specifier: ^5.7.2
@@ -839,6 +842,9 @@ packages:
 
   dexie@4.4.3:
     resolution: {integrity: sha512-N+3IGQ3HPlyO2YAkntGAwitm42BpBGV86MttzUMiRzWLa4NGh0pltVRcUVF4ybL/OnXjCrr9k7SDPIKkFYP2Lg==}
+
+  earcut@3.2.4:
+    resolution: {integrity: sha512-FHc6yNpnTORB0tM5kmZ03iD2mDuNakDE2lvf4Hw1XkfxtEHIGVi01B/GqUSwx+NcC1WGjidAfpTXzeALtPtfpg==}
 
   electron-to-chromium@1.5.373:
     resolution: {integrity: sha512-G2Hym8JIf/QreuseqkDibgH8Ci8KfJzqGDKdakbhSx9UltwRBH2cBLAWU/lBX0sCdv0TlhyxQyDCnSfxgMWsjA==}
@@ -1634,6 +1640,8 @@ snapshots:
   deep-eql@5.0.2: {}
 
   dexie@4.4.3: {}
+
+  earcut@3.2.4: {}
 
   electron-to-chromium@1.5.373: {}
 

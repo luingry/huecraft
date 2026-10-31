@@ -3,9 +3,10 @@ import { Button, IconTrash, Slider, Switch } from '@huecraft/design-system';
 import type { PaintBlend } from '@huecraft/project-schema';
 import { t } from '../../../i18n';
 import { sortStack } from '../stack';
-import { isColorBlend, type Workbench } from '../useWorkbench';
+import { isColorBlend, type BrushTool, type Workbench } from '../useWorkbench';
 
 const BLENDS: PaintBlend[] = ['normal', 'sampled', 'onLight', 'onDark', 'raise', 'lower'];
+const TOOLS: BrushTool[] = ['paint', 'brighten', 'darken'];
 
 /** Brush settings popover, opened with a right-click on the 3D view. */
 export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: number; onClose: () => void }) {
@@ -15,6 +16,7 @@ export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: 
   const maxSize = Math.max(10, Math.round(wb.project.print.widthMm / 3));
   const stack = sortStack(wb.project.stack).reverse();
   const paintCount = wb.project.paint?.length ?? 0;
+  const painting = brush.tool === 'paint' && !brush.erase;
 
   // Keep the popover inside the window.
   useLayoutEffect(() => {
@@ -62,28 +64,52 @@ export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: 
     >
       <div className="hc-menu__label">{t.brush.settings}</div>
       <div className="wb-brush-menu__body">
-        <Slider label={t.brush.size} value={brush.sizeMm} min={0.5} max={maxSize} step={0.5} unit="mm" inputMax={200} onChange={(v) => setBrush({ sizeMm: Math.max(0.2, v) })} />
-        <Slider label={t.brush.softness} value={Math.round(brush.softness * 100)} min={0} max={100} step={1} unit="%" onChange={(v) => setBrush({ softness: v / 100 })} />
-        <Slider label={t.brush.opacity} value={Math.round(brush.opacity * 100)} min={1} max={100} step={1} unit="%" onChange={(v) => setBrush({ opacity: Math.max(1, v) / 100 })} />
         <div className="hc-field">
-          <span className="hc-field__label">{t.brush.color}</span>
-          <div className="wb-brush-menu__swatches" role="group" aria-label={t.brush.color}>
-            {stack.map((e) => (
+          <span className="hc-field__label">{t.brush.tool}</span>
+          <div className="hc-seg" role="group" aria-label={t.brush.tool}>
+            {TOOLS.map((tool) => (
               <button
-                key={e.slotId}
+                key={tool}
                 type="button"
-                className="wb-brush-menu__swatch"
-                style={{ background: e.filament.colorHex }}
-                aria-pressed={!brush.erase && wb.brushSlot?.slotId === e.slotId}
-                title={e.filament.name}
-                aria-label={e.filament.name}
-                onClick={() => setBrush({ slotId: e.slotId, erase: false })}
-              />
+                className="hc-seg__item"
+                aria-pressed={!brush.erase && brush.tool === tool}
+                title={t.brush.toolHints[tool]}
+                onClick={() => setBrush({ tool, erase: false })}
+              >
+                {t.brush.tools[tool]}
+              </button>
             ))}
           </div>
-          <span className="hc-field__hint">{t.brush.colorHint}</span>
+          <span className="hc-field__hint">{t.brush.toolHints[brush.tool]}</span>
         </div>
-        {!brush.erase && (
+        <Slider label={t.brush.size} value={brush.sizeMm} min={0.5} max={maxSize} step={0.5} unit="mm" inputMax={200} onChange={(v) => setBrush({ sizeMm: Math.max(0.2, v) })} />
+        <Slider label={t.brush.softness} value={Math.round(brush.softness * 100)} min={0} max={100} step={1} unit="%" onChange={(v) => setBrush({ softness: v / 100 })} />
+        {brush.tool === 'paint' || brush.erase ? (
+          <Slider label={t.brush.opacity} value={Math.round(brush.opacity * 100)} min={1} max={100} step={1} unit="%" onChange={(v) => setBrush({ opacity: Math.max(1, v) / 100 })} />
+        ) : (
+          <Slider label={t.brush.strength} value={Math.round(brush.toneStrength * 100)} min={1} max={100} step={1} unit="%" hint={t.brush.strengthHint} onChange={(v) => setBrush({ toneStrength: Math.min(100, Math.max(1, v)) / 100 })} />
+        )}
+        {brush.tool === 'paint' && (
+          <div className="hc-field">
+            <span className="hc-field__label">{t.brush.color}</span>
+            <div className="wb-brush-menu__swatches" role="group" aria-label={t.brush.color}>
+              {stack.map((e) => (
+                <button
+                  key={e.slotId}
+                  type="button"
+                  className="wb-brush-menu__swatch"
+                  style={{ background: e.filament.colorHex }}
+                  aria-pressed={!brush.erase && wb.brushSlot?.slotId === e.slotId}
+                  title={e.filament.name}
+                  aria-label={e.filament.name}
+                  onClick={() => setBrush({ slotId: e.slotId, erase: false })}
+                />
+              ))}
+            </div>
+            <span className="hc-field__hint">{t.brush.colorHint}</span>
+          </div>
+        )}
+        {painting && (
           <div className="hc-field">
             <span className="hc-field__label">{t.brush.blend}</span>
             <div className="hc-seg wb-brush-menu__blends" role="group" aria-label={t.brush.blend}>
@@ -103,7 +129,7 @@ export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: 
             <span className="hc-field__hint">{t.brush.blendHints[brush.blend]}</span>
           </div>
         )}
-        {!brush.erase && isColorBlend(brush.blend) && (
+        {painting && isColorBlend(brush.blend) && (
           <Slider
             key={brush.blend}
             label={t.brush.tolerance}

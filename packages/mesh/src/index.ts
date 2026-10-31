@@ -5,6 +5,8 @@
  * y up with the top row of the image at y = height, z up from the bed (z = 0).
  */
 
+export { buildTerracedSolidMesh, type TerracedSolidInput } from './terrace.js';
+
 export interface MeshData {
   positions: Float32Array;
   indices: Uint32Array;
@@ -201,61 +203,149 @@ export interface SolidHeightfieldInput {
   height: number;
   widthMm: number;
   heightMm: number;
+  /**
+   * Largest vertical distance (mm) allowed between a grid sample and the
+   * RTIN surface. Default 0: every sample stays exactly on the surface and
+   * only coplanar triangles are merged (lossless).
+   */
+  maxErrorMm?: number;
 }
+
+/** "Exact": far below Float32 noise on heights of a few mm and the 0.1 µm the 3MF keeps. */
+const EXACT_EPSILON_MM = 1e-5;
 
 /**
  * Watertight, manifold solid for printing: the top surface is the heightfield
- * (one vertex per grid sample spanning exactly widthMm × heightMm), side walls
- * run along the four borders down to z = 0, and the bottom is a fan of the
- * perimeter vertices around a single centre vertex (no full bottom grid, no
- * T-junctions). Triangles are CCW seen from outside (outward normals).
+ * spanning exactly widthMm × heightMm, side walls run along the four borders
+ * down to z = 0, and the bottom is a fan of the perimeter vertices around a
+ * single centre vertex (no full bottom grid, no T-junctions). Triangles are CCW
+ * seen from outside (outward normals).
+ *
+ * The top is a right-triangulated irregular network (RTIN, as in Martini): the
+ * grid is covered by a binary tree of right triangles, and a triangle is split
+ * only where a sample under it lies more than `maxErrorMm` off its plane. Both
+ * triangles of a hypotenuse share the split decision, so there are no cracks.
+ * Snapped reliefs are flat plateaus, which collapse into few large triangles
+ * while every contour keeps one vertex per sample. Every sample stays on the
+ * surface, but inside a cell whose corners are not coplanar the RTIN diagonal
+ * alternates (4-8 pattern) instead of always running a–d, so contours there
+ * differ slightly from a fixed-diagonal grid (buildTerracedSolidMesh slices
+ * exactly like the a–d grid).
  */
 export function buildSolidHeightfieldMesh(input: SolidHeightfieldInput): MeshData {
+  if (input.width < 2 || input.height < 2) throw new Error('Heightfield needs at least 2×2 samples');
+  return closeSolid(buildRtinTop(input), input);
+}
+
+/** Open top sheet: positions of the used samples and the perimeter ring (vertex ids, CCW from above). */
+interface TopSheet {
+  positions: Float32Array;
+  indices: Uint32Array;
+  ring: Uint32Array;
+}
+
+function buildRtinTop(input: SolidHeightfieldInput): TopSheet {
   const { heights, width: w, height: h } = input;
-  if (w < 2 || h < 2) throw new Error('Heightfield needs at least 2×2 samples');
+  const maxError = Math.max(EXACT_EPSILON_MM, input.maxErrorMm ?? 0);
   const sx = input.widthMm / (w - 1);
   const sy = input.heightMm / (h - 1);
-  const topCount = w * h;
-  const perimeter = 2 * (w - 1) + 2 * (h - 1);
-  const vertexCount = topCount + perimeter + 1;
-  const triangleCount = 2 * (w - 1) * (h - 1) + 3 * perimeter;
-  const positions = new Float32Array(vertexCount * 3);
-  const indices = new Uint32Array(triangleCount * 3);
+  const w1 = w - 1;
+  const h1 = h - 1;
+  const tile = rtinTile(w, h);
+  const size = tile + 1;
+  const errors = rtinErrors(heights, w, h, tile);
 
-  for (let y = 0, o = 0; y < h; y++) {
-    const py = (h - 1 - y) * sy;
-    for (let x = 0; x < w; x++, o += 3) {
-      positions[o] = x * sx;
-      positions[o + 1] = py;
-      positions[o + 2] = heights[y * w + x];
-    }
-  }
-
+  // Two walks over the same triangle tree: the first marks the samples used and
+  // counts triangles, the second writes them once the arrays are allocated.
+  const vertexOf = new Int32Array(w * h).fill(-1);
+  let indices = new Uint32Array(0);
   let t = 0;
-  // Top: cell corners a=(x,y) b=(x+1,y) c=(x,y+1) d=(x+1,y+1); row y+1 is lower in world y.
-  for (let y = 0; y < h - 1; y++) {
-    for (let x = 0; x < w - 1; x++) {
-      const a = y * w + x;
-      const b = a + 1;
-      const c = a + w;
-      const d = c + 1;
-      indices[t++] = a; indices[t++] = c; indices[t++] = d;
-      indices[t++] = a; indices[t++] = d; indices[t++] = b;
+  let triangles = 0;
+  let emit = false;
+  const visit = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number): void => {
+    if (Math.min(ax, bx, cx) >= w1 || Math.min(ay, by, cy) >= h1) return; // padding
+    const mx = (ax + bx) >> 1;
+    const my = (ay + by) >> 1;
+    if (Math.abs(ax - cx) + Math.abs(ay - cy) > 1 && errors[my * size + mx] > maxError) {
+      visit(cx, cy, ax, ay, mx, my);
+      visit(bx, by, cx, cy, mx, my);
+      return;
     }
-  }
+    if (!emit) {
+      mark(ay * w + ax);
+      mark(by * w + bx);
+      mark(cy * w + cx);
+      triangles++;
+      return;
+    }
+    // Grid y points down and world y up: CCW from above is a negative grid cross product.
+    const flip = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) > 0;
+    indices[t++] = vertex(ax, ay);
+    indices[t++] = flip ? vertex(cx, cy) : vertex(bx, by);
+    indices[t++] = flip ? vertex(bx, by) : vertex(cx, cy);
+  };
+  let used = 0;
+  const mark = (i: number) => {
+    if (vertexOf[i] === -1) {
+      vertexOf[i] = -2;
+      used++;
+    }
+  };
+  // Vertices are numbered in the order triangles first use them, so indices
+  // grow in small steps and the 3MF deflates well.
+  let positions = new Float32Array(0);
+  let next = 0;
+  const vertex = (x: number, y: number): number => {
+    const i = y * w + x;
+    let v = vertexOf[i];
+    if (v < 0) {
+      v = vertexOf[i] = next++;
+      positions[v * 3] = x * sx;
+      positions[v * 3 + 1] = (h1 - y) * sy;
+      positions[v * 3 + 2] = heights[i];
+    }
+    return v;
+  };
+  visit(0, 0, tile, tile, tile, 0);
+  visit(tile, tile, 0, 0, 0, tile);
+
+  positions = new Float32Array(used * 3);
+  indices = new Uint32Array(triangles * 3);
+  emit = true;
+  visit(0, 0, tile, tile, tile, 0);
+  visit(tile, tile, 0, 0, 0, tile);
 
   // Perimeter, CCW seen from above: bottom edge (world y = 0, image row h-1) left→right,
-  // right edge upwards, top edge right→left, left edge downwards.
-  const ring = new Uint32Array(perimeter);
-  let k = 0;
-  for (let x = 0; x < w - 1; x++) ring[k++] = (h - 1) * w + x;
-  for (let y = h - 1; y > 0; y--) ring[k++] = y * w + (w - 1);
-  for (let x = w - 1; x > 0; x--) ring[k++] = x;
-  for (let y = 0; y < h - 1; y++) ring[k++] = y * w;
+  // right edge upwards, top edge right→left, left edge downwards. Only samples the
+  // top uses, so the walls meet it without T-junctions.
+  const ring = new Uint32Array(2 * w1 + 2 * h1);
+  let perimeter = 0;
+  const keep = (i: number) => {
+    if (vertexOf[i] >= 0) ring[perimeter++] = vertexOf[i];
+  };
+  for (let x = 0; x < w1; x++) keep(h1 * w + x);
+  for (let y = h1; y > 0; y--) keep(y * w + w1);
+  for (let x = w1; x > 0; x--) keep(x);
+  for (let y = 0; y < h1; y++) keep(y * w);
+  return { positions, indices, ring: ring.slice(0, perimeter) };
+}
+
+/** Adds the side walls and the bottom fan under a top sheet. */
+function closeSolid(top: TopSheet, input: SolidHeightfieldInput): MeshData {
+  const topCount = top.positions.length / 3;
+  const topTriangles = top.indices.length / 3;
+  const perimeter = top.ring.length;
+  const vertexCount = topCount + perimeter + 1;
+  const triangleCount = topTriangles + 3 * perimeter;
+  const positions = new Float32Array(vertexCount * 3);
+  const indices = new Uint32Array(triangleCount * 3);
+  positions.set(top.positions);
+  indices.set(top.indices);
+  let t = top.indices.length;
 
   const bottomStart = topCount;
   for (let i = 0; i < perimeter; i++) {
-    const src = ring[i] * 3;
+    const src = top.ring[i] * 3;
     const o = (bottomStart + i) * 3;
     positions[o] = positions[src];
     positions[o + 1] = positions[src + 1];
@@ -268,8 +358,8 @@ export function buildSolidHeightfieldMesh(input: SolidHeightfieldInput): MeshDat
 
   for (let i = 0; i < perimeter; i++) {
     const j = i + 1 === perimeter ? 0 : i + 1;
-    const tp = ring[i];
-    const tq = ring[j];
+    const tp = top.ring[i];
+    const tq = top.ring[j];
     const bp = bottomStart + i;
     const bq = bottomStart + j;
     // Side wall, outward.
@@ -282,24 +372,137 @@ export function buildSolidHeightfieldMesh(input: SolidHeightfieldInput): MeshDat
   return { positions, indices, triangleCount };
 }
 
-/** Every undirected edge used by exactly two triangles, in opposite directions (consistent orientation). */
-export function checkWatertight(mesh: MeshData): { ok: boolean; badEdges: number } {
-  const directed = new Map<string, number>();
-  const { indices, triangleCount } = mesh;
-  for (let t = 0; t < triangleCount; t++) {
-    for (let e = 0; e < 3; e++) {
-      const a = indices[t * 3 + e];
-      const b = indices[t * 3 + ((e + 1) % 3)];
-      const k = `${a},${b}`;
-      directed.set(k, (directed.get(k) ?? 0) + 1);
+/** Side (in cells) of the power-of-two RTIN tile covering a w×h sample grid. */
+function rtinTile(w: number, h: number): number {
+  let tile = 2;
+  while (tile < Math.max(w, h) - 1) tile *= 2;
+  return tile;
+}
+
+/**
+ * RTIN error per sample of the padded (tile + 1)² grid, stored at the midpoint
+ * of each triangle's hypotenuse: the largest distance between a sample and the
+ * plane of the triangles that splitting there would refine, children included.
+ * Triangles crossing the grid border get Infinity so they always split down to
+ * pieces entirely inside or outside; triangles in the padding are skipped.
+ *
+ * Hypotenuse midpoints come in two kinds per square size s (s = 2, 4 … tile):
+ * edge midpoints, whose two triangles lie on either side of an edge of length
+ * s with the right angle at the neighbouring square centres; and square
+ * centres, whose two triangles share a diagonal of the square (alternating
+ * with the square's parity, as in a 4-8 mesh). Walking the levels from the
+ * smallest up makes every child final before its parent reads it.
+ */
+function rtinErrors(heights: Float32Array, w: number, h: number, tile: number): Float32Array {
+  const size = tile + 1;
+  const w1 = w - 1;
+  const h1 = h - 1;
+  const errors = new Float32Array(size * size);
+  const height = (x: number, y: number) => heights[y * w + x];
+  // 0 = inside the grid, 1 = in the padding, 2 = crossing the border.
+  const classify = (x0: number, y0: number, x1: number, y1: number) =>
+    x0 >= w1 || y0 >= h1 ? 1 : x1 <= w1 && y1 <= h1 ? 0 : 2;
+
+  // Edge a–b with midpoint m; triangles with the right angle at m ± (dx, dy).
+  const edge = (ax: number, ay: number, bx: number, by: number, mx: number, my: number, dx: number, dy: number, leaf: boolean) => {
+    let e = 0;
+    let inside = false;
+    for (let side = -1; side <= 1; side += 2) {
+      const cx = mx + side * dx;
+      const cy = my + side * dy;
+      if (cx < 0 || cy < 0 || cx > tile || cy > tile) continue;
+      const k = classify(Math.min(ax, cx), Math.min(ay, cy), Math.max(bx, cx), Math.max(by, cy));
+      if (k === 1) continue;
+      if (k === 2) {
+        errors[my * size + mx] = Infinity;
+        return;
+      }
+      inside = true;
+      if (leaf) continue;
+      // Children: centres of the two half-size squares between the edge and c.
+      const l = errors[((ay + cy) >> 1) * size + ((ax + cx) >> 1)];
+      const r = errors[((by + cy) >> 1) * size + ((bx + cx) >> 1)];
+      if (l > e) e = l;
+      if (r > e) e = r;
+    }
+    if (!inside) return;
+    const d = Math.abs((height(ax, ay) + height(bx, by)) / 2 - height(mx, my));
+    errors[my * size + mx] = d > e ? d : e;
+  };
+
+  for (let s = 2; s <= tile; s *= 2) {
+    const half = s >> 1;
+    const leaf = s === 2;
+    for (let y = 0; y <= tile; y += s) for (let x = half; x < tile; x += s) edge(x - half, y, x + half, y, x, y, 0, half, leaf);
+    for (let y = half; y < tile; y += s) for (let x = 0; x <= tile; x += s) edge(x, y - half, x, y + half, x, y, half, 0, leaf);
+    for (let y = half; y < tile; y += s) {
+      for (let x = half; x < tile; x += s) {
+        const x0 = x - half;
+        const y0 = y - half;
+        const x1 = x + half;
+        const y1 = y + half;
+        const k = classify(x0, y0, x1, y1);
+        if (k === 1) continue;
+        const m = y * size + x;
+        if (k === 2) {
+          errors[m] = Infinity;
+          continue;
+        }
+        const main = ((x0 / s + y0 / s) & 1) === 0;
+        let e = Math.abs((main ? height(x0, y0) + height(x1, y1) : height(x1, y0) + height(x0, y1)) / 2 - height(x, y));
+        // Children: the four edge midpoints of the square.
+        const n = errors[y0 * size + x];
+        const so = errors[y1 * size + x];
+        const we = errors[y * size + x0];
+        const ea = errors[y * size + x1];
+        if (n > e) e = n;
+        if (so > e) e = so;
+        if (we > e) e = we;
+        if (ea > e) e = ea;
+        errors[m] = e;
+      }
     }
   }
+  return errors;
+}
+
+/**
+ * Every undirected edge used by exactly two triangles, in opposite directions
+ * (consistent orientation). Directed edges are sorted as numeric keys, so this
+ * stays fast enough to run on every export.
+ */
+export function checkWatertight(mesh: MeshData): { ok: boolean; badEdges: number } {
+  const { indices, triangleCount } = mesh;
+  const n = mesh.positions.length / 3;
+  const keys = new Float64Array(triangleCount * 3);
+  for (let t = 0, k = 0; t < triangleCount; t++) {
+    for (let e = 0; e < 3; e++) keys[k++] = indices[t * 3 + e] * n + indices[t * 3 + ((e + 1) % 3)];
+  }
+  keys.sort();
   let bad = 0;
-  for (const [k, n] of directed) {
-    const [a, b] = k.split(',');
-    if (n !== 1 || directed.get(`${b},${a}`) !== 1) bad++;
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if ((i > 0 && keys[i - 1] === k) || (i + 1 < keys.length && keys[i + 1] === k)) {
+      bad++;
+      continue;
+    }
+    const a = Math.floor(k / n);
+    if (!hasKey(keys, (k - a * n) * n + a)) bad++;
   }
   return { ok: bad === 0, badEdges: bad };
+}
+
+function hasKey(sorted: Float64Array, key: number): boolean {
+  let lo = 0;
+  let hi = sorted.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const v = sorted[mid];
+    if (v === key) return true;
+    if (v < key) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return false;
 }
 
 /** Signed volume via the divergence theorem (positive for outward normals). */

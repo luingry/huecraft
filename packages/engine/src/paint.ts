@@ -50,6 +50,11 @@ export interface PaintContext {
 
 // Same quantisation as computeLayerField, so blends see the layers the preview shows.
 const RELIEF_STEPS = 8192;
+// Amount steps of the brighten / darken lookup (coverage × opacity, 0..1).
+const TONE_STEPS = 64;
+// Cost of moving across the whole printable range, as a fraction of its luminance range:
+// among layers with about the right colour, brighten / darken prefer the nearest height.
+const TONE_DISTANCE = 0.25;
 
 function luminance(c: Uint8Array, n: number): number {
   return 0.2126 * c[n * 3] + 0.7152 * c[n * 3 + 1] + 0.0722 * c[n * 3 + 2];
@@ -72,6 +77,9 @@ function colorDistance(c: Uint8Array, a: number, b: number): number {
  * - onLight / onDark: only colours lighter / darker than the brush colour
  *   (Photoshop's Darken / Lighten);
  * - sampled: only colours close to the one under the brush when the stroke began.
+ * Brighten / darken strokes have no target: each column moves to the layer whose
+ * colour is closest to its own luminance ± coverage × opacity × the printable
+ * luminance range (only lighter / darker layers, the nearest height on ties).
  */
 export class PaintCanvas {
   readonly current: Float32Array;
@@ -79,6 +87,9 @@ export class PaintCanvas {
   private cov: Float32Array;
   /** Layer count per quantised relief value. */
   private layerOf: Uint16Array;
+  /** Relief of each layer count's plateau top. */
+  private reliefTop: Float32Array;
+  private toneTables = new Map<number, Uint16Array>();
 
   constructor(
     readonly base: Float32Array,
@@ -92,6 +103,51 @@ export class PaintCanvas {
     for (let i = 0; i <= RELIEF_STEPS; i++) {
       this.layerOf[i] = layerCountForHeight(heightForRelief(i / RELIEF_STEPS, ctx.model), ctx.model);
     }
+    this.reliefTop = new Float32Array(ctx.colors.length / 3);
+    for (let n = 0; n < this.reliefTop.length; n++) this.reliefTop[n] = reliefForLayer(n, ctx.model);
+  }
+
+  /**
+   * Brighten (dir 1) / darken (dir -1) lookup: entry n × (TONE_STEPS + 1) + k is
+   * the layer count a column showing layer n moves to with amount k / TONE_STEPS.
+   */
+  private toneTable(dir: 1 | -1): Uint16Array {
+    let table = this.toneTables.get(dir);
+    if (table) return table;
+    const { colors } = this.ctx;
+    const maxN = colors.length / 3 - 1;
+    const lo = Math.min(maxN, this.layerOf[0]);
+    const hi = Math.min(maxN, this.layerOf[RELIEF_STEPS]);
+    let minL = Infinity;
+    let maxL = -Infinity;
+    for (let m = lo; m <= hi; m++) {
+      const l = luminance(colors, m);
+      if (l < minL) minL = l;
+      if (l > maxL) maxL = l;
+    }
+    const range = maxL - minL;
+    const perLayer = hi > lo ? (TONE_DISTANCE * range) / (hi - lo) : 0;
+    table = new Uint16Array((maxN + 1) * (TONE_STEPS + 1));
+    for (let n = 0; n <= maxN; n++) {
+      const l = luminance(colors, n);
+      for (let k = 0; k <= TONE_STEPS; k++) {
+        const goal = l + (dir * range * k) / TONE_STEPS;
+        let best = n;
+        let bestCost = Math.abs(goal - l);
+        for (let m = lo; m <= hi; m++) {
+          const lm = luminance(colors, m);
+          if (dir * (lm - l) <= 0) continue;
+          const cost = Math.abs(goal - lm) + perLayer * Math.abs(m - n);
+          if (cost < bestCost) {
+            bestCost = cost;
+            best = m;
+          }
+        }
+        table[n * (TONE_STEPS + 1) + k] = best;
+      }
+    }
+    this.toneTables.set(dir, table);
+    return table;
   }
 
   clone(): PaintCanvas {
@@ -109,66 +165,28 @@ export class PaintCanvas {
   }
 
   apply(stroke: PaintStroke): void {
-    const { model, colors } = this.ctx;
     this.sigs.push(signature(stroke));
-    const { width: w, height: h, cov, current, base } = this;
-    const pts = stroke.points;
-    if (pts.length < 2 || !(stroke.opacity > 0)) return;
-    const r = Math.max(0.5, stroke.radius * w);
-    const inner = r * (1 - Math.min(1, Math.max(0, stroke.softness)));
-    const feather = r - inner;
+    if (stroke.points.length < 2 || !(stroke.opacity > 0)) return;
+    const box = rasterizeStroke(stroke, this.width, this.height, this.cov, 0, null);
+    if (box) this.paintInto(stroke, this.cov, box, this.current, true);
+  }
 
-    // Coverage of the whole stroke = max over its segments (capsules), so
-    // overlapping parts of one stroke never build up past its opacity.
-    let x0 = w;
-    let y0 = h;
-    let x1 = -1;
-    let y1 = -1;
-    const n = pts.length >> 1;
-    for (let k = 0; k < n; k++) {
-      const ax = pts[k * 2] * w;
-      const ay = pts[k * 2 + 1] * h;
-      const bx = k + 1 < n ? pts[k * 2 + 2] * w : ax;
-      const by = k + 1 < n ? pts[k * 2 + 3] * h : ay;
-      if (k + 1 >= n && n > 1) break;
-      const dx = bx - ax;
-      const dy = by - ay;
-      const len2 = dx * dx + dy * dy;
-      const sx0 = Math.max(0, Math.floor(Math.min(ax, bx) - r));
-      const sy0 = Math.max(0, Math.floor(Math.min(ay, by) - r));
-      const sx1 = Math.min(w - 1, Math.ceil(Math.max(ax, bx) + r));
-      const sy1 = Math.min(h - 1, Math.ceil(Math.max(ay, by) + r));
-      if (sx0 > sx1 || sy0 > sy1) continue;
-      if (sx0 < x0) x0 = sx0;
-      if (sy0 < y0) y0 = sy0;
-      if (sx1 > x1) x1 = sx1;
-      if (sy1 > y1) y1 = sy1;
-      for (let y = sy0; y <= sy1; y++) {
-        const py = y + 0.5;
-        const row = y * w;
-        for (let x = sx0; x <= sx1; x++) {
-          const px = x + 0.5;
-          let u = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
-          u = u < 0 ? 0 : u > 1 ? 1 : u;
-          const ex = px - (ax + u * dx);
-          const ey = py - (ay + u * dy);
-          const d = Math.sqrt(ex * ex + ey * ey);
-          if (d >= r) continue;
-          let c = 1;
-          if (d > inner) {
-            const s = 1 - (d - inner) / feather;
-            c = s * s * (3 - 2 * s);
-          }
-          if (c > cov[row + x]) cov[row + x] = c;
-        }
-      }
-    }
-    if (x1 < 0) return;
-
+  /**
+   * Writes `stroke` with coverage `cov` inside `box` into `out`, judged on this
+   * canvas's surface (the surface before the stroke). `out` may be `current`.
+   * `consume` zeroes the coverage it reads, leaving `cov` clean for the next stroke.
+   */
+  paintInto(stroke: PaintStroke, cov: Float32Array, box: StrokeBox, out: Float32Array, consume: boolean): void {
+    const { model, colors } = this.ctx;
+    const { width: w, height: h, current, base } = this;
+    const { x0, y0, x1, y1 } = box;
     const op = Math.min(1, stroke.opacity);
     const target = reliefForLayer(stroke.layer, model);
     const erase = stroke.mode === 'erase';
-    const blend = erase ? 'normal' : (stroke.blend ?? 'normal');
+    const tone = stroke.mode === 'brighten' ? 1 : stroke.mode === 'darken' ? -1 : 0;
+    const toneTable = tone ? this.toneTable(tone) : null;
+    const reliefTop = this.reliefTop;
+    const blend = erase || tone ? 'normal' : (stroke.blend ?? 'normal');
     const maxN = colors.length / 3 - 1;
     const targetN = Math.min(maxN, Math.max(0, stroke.layer));
     const targetLum = luminance(colors, targetN);
@@ -179,7 +197,7 @@ export class PaintCanvas {
     const layerOf = this.layerOf;
     const colorBlend = blend === 'onLight' || blend === 'onDark' || blend === 'sampled';
     // Layer shown by each line-width block of the stroke's box, from the surface before the stroke.
-    const f = colorBlend ? Math.max(1, Math.round(this.ctx.cell ?? 1)) : 1;
+    const f = colorBlend || toneTable ? Math.max(1, Math.round(this.ctx.cell ?? 1)) : 1;
     const cx0 = (x0 / f) | 0;
     const cy0 = (y0 / f) | 0;
     const cw = ((x1 / f) | 0) - cx0 + 1;
@@ -206,19 +224,25 @@ export class PaintCanvas {
         const i = row + x;
         const c = cov[i];
         if (c <= 0) continue;
-        cov[i] = 0;
+        if (consume) cov[i] = 0;
         const cur = current[i];
+        // Layer the column shows (only the colour-aware strokes need it).
+        const n = !toneTable && !colorBlend ? 0 : Math.min(maxN, cellLayer
+          ? cellLayer[(((y / f) | 0) - cy0) * cw + (((x / f) | 0) - cx0)]
+          : layerOf[((cur < 0 ? 0 : cur > 1 ? 1 : cur) * RELIEF_STEPS + 0.5) | 0]);
+        if (toneTable) {
+          const m = toneTable[n * (TONE_STEPS + 1) + ((c * op * TONE_STEPS + 0.5) | 0)];
+          if (m !== n) out[i] = reliefTop[m];
+          continue;
+        }
         const goal = erase ? base[i] : target;
         if ((blend === 'raise' && goal <= cur) || (blend === 'lower' && goal >= cur)) continue;
         if (colorBlend) {
-          const n = Math.min(maxN, cellLayer
-            ? cellLayer[(((y / f) | 0) - cy0) * cw + (((x / f) | 0) - cx0)]
-            : layerOf[((cur < 0 ? 0 : cur > 1 ? 1 : cur) * RELIEF_STEPS + 0.5) | 0]);
           if (blend === 'onLight' ? luminance(colors, n) - targetLum <= margin
             : blend === 'onDark' ? targetLum - luminance(colors, n) <= margin
             : colorDistance(colors, n, sampleN) > tolerance) continue;
         }
-        current[i] = cur + (goal - cur) * c * op;
+        out[i] = cur + (goal - cur) * c * op;
       }
     }
   }
@@ -227,6 +251,116 @@ export class PaintCanvas {
   composite(): Float32Array {
     return this.current.slice();
   }
+}
+
+/** Pixel bounds (inclusive) a stroke's coverage touches. */
+export interface StrokeBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+/**
+ * Coverage of a stroke = max over its segments (capsules), so overlapping
+ * parts of one stroke never build up past its opacity. Rasterises segments
+ * from `from` on into `cov` and returns `box` grown to cover them (null if
+ * nothing is covered yet).
+ */
+function rasterizeStroke(stroke: PaintStroke, w: number, h: number, cov: Float32Array, from: number, box: StrokeBox | null): StrokeBox | null {
+  const pts = stroke.points;
+  const r = Math.max(0.5, stroke.radius * w);
+  const inner = r * (1 - Math.min(1, Math.max(0, stroke.softness)));
+  const feather = r - inner;
+  const n = pts.length >> 1;
+  for (let k = from; k < n; k++) {
+    const ax = pts[k * 2] * w;
+    const ay = pts[k * 2 + 1] * h;
+    const bx = k + 1 < n ? pts[k * 2 + 2] * w : ax;
+    const by = k + 1 < n ? pts[k * 2 + 3] * h : ay;
+    if (k + 1 >= n && n > 1) break;
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    const sx0 = Math.max(0, Math.floor(Math.min(ax, bx) - r));
+    const sy0 = Math.max(0, Math.floor(Math.min(ay, by) - r));
+    const sx1 = Math.min(w - 1, Math.ceil(Math.max(ax, bx) + r));
+    const sy1 = Math.min(h - 1, Math.ceil(Math.max(ay, by) + r));
+    if (sx0 > sx1 || sy0 > sy1) continue;
+    if (!box) box = { x0: sx0, y0: sy0, x1: sx1, y1: sy1 };
+    else {
+      if (sx0 < box.x0) box.x0 = sx0;
+      if (sy0 < box.y0) box.y0 = sy0;
+      if (sx1 > box.x1) box.x1 = sx1;
+      if (sy1 > box.y1) box.y1 = sy1;
+    }
+    for (let y = sy0; y <= sy1; y++) {
+      const py = y + 0.5;
+      const row = y * w;
+      for (let x = sx0; x <= sx1; x++) {
+        const px = x + 0.5;
+        let u = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+        u = u < 0 ? 0 : u > 1 ? 1 : u;
+        const ex = px - (ax + u * dx);
+        const ey = py - (ay + u * dy);
+        const d = Math.sqrt(ex * ex + ey * ey);
+        if (d >= r) continue;
+        let c = 1;
+        if (d > inner) {
+          const s = 1 - (d - inner) / feather;
+          c = s * s * (3 - 2 * s);
+        }
+        if (c > cov[row + x]) cov[row + x] = c;
+      }
+    }
+  }
+  return box;
+}
+
+/**
+ * The stroke being drawn, painted over a canvas of the settled strokes. Its
+ * coverage is kept between calls: while points are only appended, just the new
+ * segments are rasterised, so a long stroke costs the same per update as a
+ * short one. Gives exactly what PaintCanvas.apply would.
+ */
+export class LiveStroke {
+  private readonly cov: Float32Array;
+  private readonly out: Float32Array;
+  private box: StrokeBox | null = null;
+  private key = '';
+  private points: number[] = [];
+
+  constructor(readonly width: number, readonly height: number) {
+    this.cov = new Float32Array(width * height);
+    this.out = new Float32Array(width * height);
+  }
+
+  /** Relief of `canvas` with `stroke` painted on top. The array is reused by the next call. */
+  render(canvas: PaintCanvas, stroke: PaintStroke): Float32Array {
+    const pts = stroke.points;
+    const key = `${stroke.id}:${stroke.radius}:${stroke.softness}`;
+    let from = 0;
+    if (key === this.key && this.points.length >= 2 && isPrefix(this.points, pts)) {
+      // The last segment drawn ended at the previous last point; continue from there.
+      from = (this.points.length >> 1) - 1;
+    } else {
+      this.cov.fill(0);
+      this.box = null;
+    }
+    this.key = key;
+    this.points = pts.slice();
+    this.out.set(canvas.current);
+    if (pts.length < 2 || !(stroke.opacity > 0)) return this.out;
+    this.box = rasterizeStroke(stroke, this.width, this.height, this.cov, from, this.box);
+    if (this.box) canvas.paintInto(stroke, this.cov, this.box, this.out, false);
+    return this.out;
+  }
+}
+
+function isPrefix(a: number[], b: number[]): boolean {
+  if (a.length > b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 /** Uncached: paints every stroke over `t` on a fresh canvas. */

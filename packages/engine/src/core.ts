@@ -24,9 +24,10 @@ import {
   layerHistogram,
   type LayerModel,
 } from '@huecraft/optics';
-import { buildSolidHeightfieldMesh, buildTerracedMesh } from '@huecraft/mesh';
-import { export3mf, exportBinaryStl, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
-import { applyPaint, PaintCanvas, type PaintContext } from './paint.js';
+import { buildSolidHeightfieldMesh, buildTerracedMesh, buildTerracedSolidMesh } from '@huecraft/mesh';
+import { export3mf, exportBinaryStl, exportStlZip, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
+import { buildFaceDownModel, formatFaceDownPlan } from './faceDown.js';
+import { applyPaint, LiveStroke, PaintCanvas, type PaintContext } from './paint.js';
 import type { PaintStroke, StackEntry } from '@huecraft/project-schema';
 import type { ExportRequestParams, ExportResult, PreviewParams, PreviewResult, SourceImage } from './protocol.js';
 import { computeSwaps, FALLBACK_FILAMENT, formatSwapPlan, layerFilaments, normalizeStack } from './stack.js';
@@ -82,7 +83,7 @@ class Lru<V> {
 }
 
 function reliefKey(size: GridSize, r: ReliefParams): string {
-  return `${size.width}x${size.height}|${r.brightness}|${r.contrast}|${r.gamma}|${r.invert ? 1 : 0}|${r.smoothing}`;
+  return `${size.width}x${size.height}|${r.brightness}|${r.contrast}|${r.gamma}|${r.invert ? 1 : 0}|${r.smoothing}|${r.posterize ?? 0}`;
 }
 
 function safeFileName(name: string): string {
@@ -101,6 +102,7 @@ export class EngineCore {
   private grids = new Lru<LumaAlpha>(3);
   private reliefs = new Lru<Float32Array>(4);
   private paintCache: { key: string; base: Float32Array; canvas: PaintCanvas } | null = null;
+  private live: LiveStroke | null = null;
 
   setImage(image: SourceImage): void {
     if (!(image.width > 0 && image.height > 0) || image.rgba.length < image.width * image.height * 4) {
@@ -143,8 +145,8 @@ export class EngineCore {
 
   /**
    * Relief with the brush strokes composited. The canvas holding every stroke
-   * but the last is cached, so while a stroke is being drawn only that stroke
-   * is rasterised again.
+   * but the last is cached, and the stroke being drawn keeps its coverage, so
+   * each update only rasterises the segments added since the last one.
    */
   private painted(size: GridSize, relief: ReliefParams, t: Float32Array, strokes: PaintStroke[] | undefined, ctx: PaintContext): Float32Array {
     if (!strokes || strokes.length === 0) return t;
@@ -158,9 +160,8 @@ export class EngineCore {
     }
     const canvas = cache.canvas;
     for (let i = canvas.sigs.length; i < settled.length; i++) canvas.apply(settled[i]);
-    const live = canvas.clone();
-    live.apply(strokes[strokes.length - 1]);
-    return live.current;
+    if (!this.live || this.live.width !== size.width || this.live.height !== size.height) this.live = new LiveStroke(size.width, size.height);
+    return this.live.render(canvas, strokes[strokes.length - 1]);
   }
 
   preview(params: PreviewParams): PreviewResult {
@@ -251,20 +252,36 @@ export class EngineCore {
     const t1 = performance.now();
     const t = applyPaint(this.relief(grid, params.relief), grid.width, grid.height, params.paint ?? [], paintContext(params.stack, print, model, lineCell(!!params.simulateLineWidth, print, size.width / grid.width)));
     const t2 = performance.now();
+    if (params.orientation === 'faceDown') return this.exportFaceDown(params, t, grid, size, model, [t0, t1, t2]);
 
     // Top surface: snapped to the layer top the slicer will print (mid-plane
     // rule), or the raw relief height.
     const heights = new Float32Array(t.length);
     let maxZ = 0;
-    if (print.snapToLayers) {
-      const field = computeLayerField(t, model);
-      const zOfCount = plateauZ(print, model.totalLayers);
+    const field = print.snapToLayers ? computeLayerField(t, model) : null;
+    const zOfCount = plateauZ(print, model.totalLayers);
+    if (field) {
       for (let i = 0; i < t.length; i++) heights[i] = zOfCount[field[i]];
     } else {
       for (let i = 0; i < t.length; i++) heights[i] = heightForRelief(t[i], model);
     }
     for (let i = 0; i < heights.length; i++) if (heights[i] > maxZ) maxZ = heights[i];
-    const mesh = buildSolidHeightfieldMesh({ heights, width: grid.width, height: grid.height, widthMm: size.width, heightMm: size.height });
+    let mesh = buildSolidHeightfieldMesh({ heights, width: grid.width, height: grid.height, widthMm: size.width, heightMm: size.height });
+    // Snapped reliefs can also be built as flat terraces with the same mid-layer
+    // cross-sections; keep whichever needs fewer triangles (terraces win on
+    // smooth images, the heightfield on noisy ones).
+    if (field) {
+      const terraced = buildTerracedSolidMesh({
+        field,
+        width: grid.width,
+        height: grid.height,
+        widthMm: size.width,
+        heightMm: size.height,
+        zOfCount,
+        maxTriangles: mesh.triangleCount,
+      });
+      if (terraced && terraced.triangleCount < mesh.triangleCount) mesh = terraced;
+    }
     const t3 = performance.now();
 
     const stack = normalizeStack(params.stack);
@@ -312,6 +329,71 @@ export class EngineCore {
       triangleCount: mesh.triangleCount,
       swapText,
       ...(slicerProject ? { slicerProject } : {}),
+      timings: {
+        resizeMs: t1 - t0,
+        reliefMs: t2 - t1,
+        meshMs: t3 - t2,
+        encodeMs: t4 - t3,
+        totalMs: t4 - t0,
+        gridWidth: grid.width,
+        gridHeight: grid.height,
+      },
+    };
+  }
+
+  /** Face-down export: always layer-snapped, one part per filament (see faceDown.ts). */
+  private exportFaceDown(
+    params: ExportRequestParams,
+    t: Float32Array,
+    grid: GridSize,
+    size: { width: number; height: number },
+    model: LayerModel,
+    [t0, t1, t2]: number[],
+  ): ExportResult {
+    const { print } = params;
+    const stack = normalizeStack(params.stack);
+    const fd = buildFaceDownModel({
+      field: computeLayerField(t, model),
+      width: grid.width,
+      height: grid.height,
+      widthMm: size.width,
+      heightMm: size.height,
+      print,
+      totalLayers: model.totalLayers,
+      stack,
+    });
+    const t3 = performance.now();
+    const swapText = formatFaceDownPlan({
+      name: params.name,
+      print,
+      totalLayers: model.totalLayers,
+      sizeMm: { width: size.width, height: size.height, z: fd.heightMm },
+      filaments: fd.filaments,
+    });
+    const base = safeFileName(params.name);
+    let bytes: Uint8Array;
+    let ext: string;
+    if (params.format === 'stl') {
+      ext = 'zip';
+      bytes = exportStlZip(
+        fd.perFilament.map((e) => ({ fileName: `${base} - ${e.filament.extruder} ${safeFileName(e.filament.name)}.stl`, mesh: e.mesh })),
+        { [`${base} - filamentos.txt`]: swapText },
+      );
+    } else {
+      ext = '3mf';
+      bytes = export3mf(fd.mesh, {
+        name: params.name,
+        volumes: fd.volumes,
+        attachments: { 'Metadata/hueCraft_swap_plan.txt': swapText },
+      });
+    }
+    const t4 = performance.now();
+    return {
+      bytes,
+      fileName: `${base} (face down).${ext}`,
+      mimeType: ext === 'zip' ? 'application/zip' : 'model/3mf',
+      triangleCount: fd.mesh.triangleCount,
+      swapText,
       timings: {
         resizeMs: t1 - t0,
         reliefMs: t2 - t1,
