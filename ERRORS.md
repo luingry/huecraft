@@ -29,3 +29,9 @@
 - **Symptom:** after adding 4–5 filaments with "Adicionar filamento", the last one is listed but never appears in the image (or has no band in the layer bar).
 - **Cause:** `addOnTop` placed each new swap halfway between the current top swap and the *last layer of the print*. Each add halves the remaining gap, so after a few adds the swap lands on/after the last layer, or above the highest layer any pixel reaches. There is no limit on the number of colours.
 - **Fix:** `addOnTop` now uses the highest layer the image reaches (`topReachedLayer`, from the layer histogram) and, when no room is left above the top swap, splits the thickest band instead. Rows whose swap starts above the reached layer are dimmed with a tooltip.
+
+## The "Cor do centro" brush skips small areas of the sampled colour
+
+- **Symptom:** in sampled mode, small areas showing the clicked colour are not painted even when aimed at exactly. Similar colours elsewhere paint fine.
+- **Cause:** with "Simular largura de linha" on, the view shows the average of each line-width block of pixels. The sample came from that displayed block, but the blend tested each raw pixel. In detailed areas, few or none of the raw pixels are at the displayed layer.
+- **Fix:** `PaintContext.cell` (the line-width block size in pixels). Colour blends now judge each block by the layer it shows, computed from the surface before the stroke. The export receives `simulateLineWidth` so it makes the same decision as the preview.

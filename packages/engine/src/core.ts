@@ -149,7 +149,7 @@ export class EngineCore {
   private painted(size: GridSize, relief: ReliefParams, t: Float32Array, strokes: PaintStroke[] | undefined, ctx: PaintContext): Float32Array {
     if (!strokes || strokes.length === 0) return t;
     const model = ctx.model;
-    const key = `${reliefKey(size, relief)}|${model.layerHeightMm}|${model.firstLayerHeightMm}|${model.baseThicknessMm}|${model.maxHeightMm}|${ctx.colors.join(',')}`;
+    const key = `${reliefKey(size, relief)}|${model.layerHeightMm}|${model.firstLayerHeightMm}|${model.baseThicknessMm}|${model.maxHeightMm}|${ctx.cell ?? 1}|${ctx.colors.join(',')}`;
     const settled = strokes.slice(0, -1);
     let cache = this.paintCache;
     if (!cache || cache.key !== key || cache.base !== t || !cache.canvas.isPrefixOf(settled)) {
@@ -172,21 +172,17 @@ export class EngineCore {
     const grid = previewGridSize(src.width, src.height, params.maxEdge);
     this.grid(grid);
     const t1 = performance.now();
-    const t = this.painted(grid, params.relief, this.relief(grid, params.relief), params.paint, paintContext(params.paintStack ?? params.stack, print, model));
-    const t2 = performance.now();
-
-    const full = computeLayerField(t, model);
-    const layerHist = layerHistogram(full, model.totalLayers);
     // Line-width limit: applied to every view (both colour maps and the 3D mesh)
     // so they agree with each other and with what the slicer can print. The
     // histogram stays on the full-resolution field so stack auto-distribution
     // does not jump when the toggle changes.
-    const pitch = size.width / grid.width;
-    let field = full;
-    if (params.simulateLineWidth && print.lineWidthMm > pitch) {
-      const factor = Math.round(print.lineWidthMm / pitch);
-      if (factor > 1) field = computeLineLimitedLayerField(t, grid.width, grid.height, factor, model);
-    }
+    const cell = lineCell(params.simulateLineWidth, print, size.width / grid.width);
+    const t = this.painted(grid, params.relief, this.relief(grid, params.relief), params.paint, paintContext(params.paintStack ?? params.stack, print, model, cell));
+    const t2 = performance.now();
+
+    const full = computeLayerField(t, model);
+    const layerHist = layerHistogram(full, model.totalLayers);
+    const field = cell > 1 ? computeLineLimitedLayerField(t, grid.width, grid.height, cell, model) : full;
     const t3 = performance.now();
 
     const stack = normalizeStack(params.stack);
@@ -253,7 +249,7 @@ export class EngineCore {
     const grid = exportGridSize(src.width, src.height, size.width, print.exportResolutionMm);
     this.grid(grid);
     const t1 = performance.now();
-    const t = applyPaint(this.relief(grid, params.relief), grid.width, grid.height, params.paint ?? [], paintContext(params.stack, print, model));
+    const t = applyPaint(this.relief(grid, params.relief), grid.width, grid.height, params.paint ?? [], paintContext(params.stack, print, model, lineCell(!!params.simulateLineWidth, print, size.width / grid.width)));
     const t2 = performance.now();
 
     // Top surface: snapped to the layer top the slicer will print (mid-plane
@@ -330,10 +326,16 @@ export class EngineCore {
 }
 
 /** Printed colour per layer count, for the colour-aware brush blends. */
-function paintContext(stack: StackEntry[], print: PrintParams, model: LayerModel): PaintContext {
+function paintContext(stack: StackEntry[], print: PrintParams, model: LayerModel, cell: number): PaintContext {
   const layers = layerFilaments(normalizeStack(stack), model.totalLayers);
   const thickness = (k: number) => (k === 0 ? print.firstLayerHeightMm : print.layerHeightMm);
-  return { model, colors: buildPrintedLut(layers, thickness) };
+  return { model, colors: buildPrintedLut(layers, thickness), cell };
+}
+
+/** Side in pixels of the line-width blocks the preview averages (1 = off). */
+function lineCell(simulate: boolean, print: PrintParams, pitchMm: number): number {
+  if (!simulate || print.lineWidthMm <= pitchMm) return 1;
+  return Math.max(1, Math.round(print.lineWidthMm / pitchMm));
 }
 
 /** Pure preview: no caching across calls. */

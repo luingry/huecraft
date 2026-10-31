@@ -487,6 +487,7 @@ export function useWorkbench() {
           swapCommand: project.export.swapCommand,
           format: kind,
           paint: resolvedPaint,
+          simulateLineWidth,
           slicerTemplate: kind === '3mf' ? slicerTemplate?.bytes : undefined,
         });
         const fileName = `${base}.${kind}`;
@@ -501,7 +502,7 @@ export function useWorkbench() {
         setExporting(false);
       }
     },
-    [image, result, project, engine.client, slicerTemplate, showToast, resolvedPaint],
+    [image, result, project, engine.client, slicerTemplate, showToast, resolvedPaint, simulateLineWidth],
   );
 
   const chooseSlicerTemplate = useCallback(

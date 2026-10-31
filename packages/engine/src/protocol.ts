@@ -77,6 +77,8 @@ export interface ExportRequestParams {
   format: '3mf' | 'stl';
   /** Brush strokes with their target layer already resolved (see resolvePaintLayers). */
   paint?: PaintStroke[];
+  /** The preview simulated the line width: colour blends judge line-width blocks, as they were shown. */
+  simulateLineWidth?: boolean;
   /**
    * Optional (additive): bytes of any project 3MF saved by the user's own Bambu
    * Studio or OrcaSlicer. Its printer/process/filament configuration is copied

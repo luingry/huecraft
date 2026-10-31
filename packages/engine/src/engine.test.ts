@@ -123,6 +123,21 @@ describe('brush paint', () => {
     expect(Array.from(sampled.layerField)).not.toEqual(Array.from(plain.layerField));
   });
 
+  it('sampled judges the line-width blocks the view shows, not the raw pixels under them', () => {
+    // Checkerboard finer than the line width: every block shows the average, a layer no raw pixel has.
+    const noisy: SourceImage = gradient(200, 200);
+    for (let i = 0; i < 200 * 200; i++) {
+      const v = (i + Math.floor(i / 200)) % 2 ? 255 : 0;
+      noisy.rgba[i * 4] = noisy.rgba[i * 4 + 1] = noisy.rgba[i * 4 + 2] = v;
+    }
+    const fine = { ...print, widthMm: 20 };
+    const params = previewParams({ print: fine, maxEdge: 200, simulateLineWidth: true });
+    const plain = runPreview(noisy, params);
+    const shown = plain.layerField[100 * 200 + 100];
+    const r = runPreview(noisy, { ...params, paint: [dot({ radius: 2, points: [0.5, 0.5], layer: plain.totalLayers, blend: 'sampled', sampleLayer: shown, tolerance: 0 })] });
+    for (let i = 0; i < r.layerField.length; i++) expect(r.layerField[i]).toBe(plain.layerField[i] === shown ? plain.totalLayers : plain.layerField[i]);
+  });
+
   it('cached incremental painting matches a fresh run', () => {
     const core = new EngineCore();
     core.setImage(image);

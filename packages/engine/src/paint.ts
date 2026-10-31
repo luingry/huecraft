@@ -40,6 +40,12 @@ export interface PaintContext {
   model: LayerModel;
   /** Printed RGB per layer count (index n), as the preview shows it. */
   colors: Uint8Array;
+  /**
+   * Side in pixels of the blocks the view averages to simulate the line width
+   * (1 / missing = per pixel). Colour blends judge each block by the colour it
+   * shows, so a small area that looks like the sampled colour is painted whole.
+   */
+  cell?: number;
 }
 
 // Same quantisation as computeLayerField, so blends see the layers the preview shows.
@@ -172,6 +178,28 @@ export class PaintCanvas {
     const margin = tolerance * 255;
     const layerOf = this.layerOf;
     const colorBlend = blend === 'onLight' || blend === 'onDark' || blend === 'sampled';
+    // Layer shown by each line-width block of the stroke's box, from the surface before the stroke.
+    const f = colorBlend ? Math.max(1, Math.round(this.ctx.cell ?? 1)) : 1;
+    const cx0 = (x0 / f) | 0;
+    const cy0 = (y0 / f) | 0;
+    const cw = ((x1 / f) | 0) - cx0 + 1;
+    let cellLayer: Uint16Array | null = null;
+    if (f > 1) {
+      const chh = ((y1 / f) | 0) - cy0 + 1;
+      cellLayer = new Uint16Array(cw * chh);
+      for (let cy = 0; cy < chh; cy++) {
+        const ya = (cy0 + cy) * f;
+        const yb = Math.min(h, ya + f);
+        for (let cx = 0; cx < cw; cx++) {
+          const xa = (cx0 + cx) * f;
+          const xb = Math.min(w, xa + f);
+          let sum = 0;
+          for (let y = ya; y < yb; y++) for (let x = xa; x < xb; x++) sum += current[y * w + x];
+          const avg = sum / ((yb - ya) * (xb - xa));
+          cellLayer[cy * cw + cx] = layerOf[((avg < 0 ? 0 : avg > 1 ? 1 : avg) * RELIEF_STEPS + 0.5) | 0];
+        }
+      }
+    }
     for (let y = y0; y <= y1; y++) {
       const row = y * w;
       for (let x = x0; x <= x1; x++) {
@@ -183,7 +211,9 @@ export class PaintCanvas {
         const goal = erase ? base[i] : target;
         if ((blend === 'raise' && goal <= cur) || (blend === 'lower' && goal >= cur)) continue;
         if (colorBlend) {
-          const n = Math.min(maxN, layerOf[((cur < 0 ? 0 : cur > 1 ? 1 : cur) * RELIEF_STEPS + 0.5) | 0]);
+          const n = Math.min(maxN, cellLayer
+            ? cellLayer[(((y / f) | 0) - cy0) * cw + (((x / f) | 0) - cx0)]
+            : layerOf[((cur < 0 ? 0 : cur > 1 ? 1 : cur) * RELIEF_STEPS + 0.5) | 0]);
           if (blend === 'onLight' ? luminance(colors, n) - targetLum <= margin
             : blend === 'onDark' ? targetLum - luminance(colors, n) <= margin
             : colorDistance(colors, n, sampleN) > tolerance) continue;
