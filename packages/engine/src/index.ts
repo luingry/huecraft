@@ -1,3 +1,4 @@
+import type { AutoTuneParams, AutoTuneResult } from './autotune.js';
 import type {
   ExportRequestParams,
   ExportResult,
@@ -10,6 +11,7 @@ import type {
 import { LatestWinsQueue } from './scheduler.js';
 
 export * from './protocol.js';
+export { autoTune, buildTuneTarget, layerStats, type AutoTuneOptions, type AutoTuneParams, type AutoTuneResult } from './autotune.js';
 export { EngineCore, runExport, runPreview, layerModelFor, physicalSize, plateauZ } from './core.js';
 export { buildFaceDownModel, colourDepthMap, faceDownPreview, formatFaceDownPlan, CLEAR_FILAMENT, type FaceDownPreview } from './faceDown.js';
 export { PaintCanvas, applyPaint, paintTargetLayer, resolvePaintLayers } from './paint.js';
@@ -24,7 +26,8 @@ interface PendingCall {
 type RequestBody =
   | { type: 'setImage'; image: SourceImage }
   | { type: 'preview'; params: PreviewParams }
-  | { type: 'export'; params: ExportRequestParams };
+  | { type: 'export'; params: ExportRequestParams }
+  | { type: 'autoTune'; params: AutoTuneParams };
 
 /**
  * Main-thread handle to the engine worker.
@@ -64,6 +67,11 @@ export class EngineClient {
     return this.call<ExportResult>({ type: 'export', params });
   }
 
+  /** Queued in order with the other requests; previews wait while it runs (a few seconds at most). */
+  autoTune(params: AutoTuneParams): Promise<AutoTuneResult> {
+    return this.call<AutoTuneResult>({ type: 'autoTune', params });
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -97,6 +105,7 @@ export class EngineClient {
         call.resolve(msg.result);
         break;
       case 'export':
+      case 'autoTune':
         call.resolve(msg.result);
         break;
       case 'error':

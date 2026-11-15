@@ -39,6 +39,15 @@ export function ControlPanel({ wb, onPickImage }: { wb: Workbench; onPickImage: 
           step={0.05}
           onChange={(contrast) => wb.updateRelief({ contrast })}
         />
+        <Slider
+          label={t.image.colorMatch}
+          value={relief.colorMatch ?? 0}
+          min={0}
+          max={1}
+          step={0.05}
+          hint={(relief.colorMatch ?? 0) > 0 ? t.image.colorMatchHint : t.image.colorMatchOff}
+          onChange={(colorMatch) => wb.updateRelief({ colorMatch })}
+        />
         <Switch
           label={t.image.invert}
           hint={relief.invert ? t.image.invertHint : undefined}

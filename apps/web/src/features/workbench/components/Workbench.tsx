@@ -150,7 +150,7 @@ export function Workbench() {
       )}
       {wb.toast && (
         <div key={wb.toast.id} className={`hc-toast${wb.toast.kind === 'error' ? ' hc-toast--error' : ''}`} onClick={wb.dismissToast}>
-          {wb.toast.sticky && <span className="wb-spinner" />}
+          {wb.toast.sticky && (wb.exporting || wb.tuning) && <span className="wb-spinner" />}
           {wb.toast.text}
         </div>
       )}

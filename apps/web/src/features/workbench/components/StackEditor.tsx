@@ -150,6 +150,38 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
           </Button>
           <Menu
             trigger={({ toggle }) => (
+              <Button size="sm" variant="ghost" onClick={toggle} disabled={!wb.result || wb.tuning} title={t.autoTune.hint}>
+                {t.autoTune.button}
+              </Button>
+            )}
+          >
+            {(close) => (
+              <>
+                <div className="hc-menu__label">{t.autoTune.hint}</div>
+                {(
+                  [
+                    [t.autoTune.swaps, t.autoTune.swapsHint, { reorder: false, tone: false }],
+                    [t.autoTune.order, t.autoTune.orderHint, { reorder: true, tone: false }],
+                    [t.autoTune.full, t.autoTune.fullHint, { reorder: true, tone: true }],
+                    [t.autoTune.color, t.autoTune.colorHint, { reorder: true, tone: false, colorMatch: (wb.project.relief.colorMatch ?? 0) > 0 ? wb.project.relief.colorMatch : 0.95 }],
+                  ] as const
+                ).map(([label, hint, options]) => (
+                  <MenuItem
+                    key={label}
+                    hint={hint}
+                    onClick={() => {
+                      close();
+                      void wb.autoTune(options);
+                    }}
+                  >
+                    {label}
+                  </MenuItem>
+                ))}
+              </>
+            )}
+          </Menu>
+          <Menu
+            trigger={({ toggle }) => (
               <IconButton label={t.stack.add} onClick={toggle}>
                 <IconPlus />
               </IconButton>

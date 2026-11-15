@@ -22,6 +22,12 @@ export interface ReliefParams {
    * a simpler print with less shading. 0 = off (continuous relief).
    */
   posterize: number;
+  /**
+   * Colour-driven heights, 0..1. 0 (or missing) = height from luma only. Above
+   * 0 each pixel takes the layer count whose printed colour best matches it,
+   * pulled towards the luma height by (1 - colorMatch). Depends on the stack.
+   */
+  colorMatch?: number;
 }
 
 export interface PrintParams {

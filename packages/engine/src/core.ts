@@ -26,11 +26,16 @@ import {
 } from '@huecraft/optics';
 import { buildSolidHeightfieldMesh, buildTerracedMesh, buildTerracedSolidMesh } from '@huecraft/mesh';
 import { export3mf, exportBambuPartsProject, exportBinaryStl, exportStlZip, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
+import { colorHeightField, lutToOklab } from './colorHeight.js';
+import { autoTune, buildTuneTarget, type AutoTuneParams, type AutoTuneResult, type TuneTarget } from './autotune.js';
 import { buildFaceDownModel, formatFaceDownPlan } from './faceDown.js';
 import { applyPaint, LiveStroke, PaintCanvas, type PaintContext } from './paint.js';
 import type { PaintStroke, StackEntry } from '@huecraft/project-schema';
 import type { ExportRequestParams, ExportResult, PreviewParams, PreviewResult, SourceImage } from './protocol.js';
 import { computeSwaps, FALLBACK_FILAMENT, formatSwapPlan, layerFilaments, normalizeStack } from './stack.js';
+
+/** Longest edge of the grid auto-tune compares on (colour error is judged from a distance). */
+const AUTOTUNE_MAX_EDGE = 240;
 
 /** Layer geometry derived from print params (validated). */
 export function layerModelFor(print: PrintParams): LayerModel {
@@ -83,7 +88,7 @@ class Lru<V> {
 }
 
 function reliefKey(size: GridSize, r: ReliefParams): string {
-  return `${size.width}x${size.height}|${r.brightness}|${r.contrast}|${r.gamma}|${r.invert ? 1 : 0}|${r.smoothing}|${r.posterize ?? 0}`;
+  return `${size.width}x${size.height}|${r.brightness}|${r.contrast}|${r.gamma}|${r.invert ? 1 : 0}|${r.smoothing}|${r.posterize ?? 0}|${r.colorMatch ?? 0}`;
 }
 
 function safeFileName(name: string): string {
@@ -99,6 +104,10 @@ function safeFileName(name: string): string {
  */
 export class EngineCore {
   private source: LumaAlpha | null = null;
+  /** Original pixels, kept for auto-tune's colour target. */
+  private rgba: SourceImage | null = null;
+  private tuneTarget: { key: string; target: TuneTarget } | null = null;
+  private colorTargets = new Lru<TuneTarget>(3);
   private grids = new Lru<LumaAlpha>(3);
   private reliefs = new Lru<Float32Array>(4);
   private paintCache: { key: string; base: Float32Array; canvas: PaintCanvas } | null = null;
@@ -109,6 +118,9 @@ export class EngineCore {
       throw new Error('Invalid image');
     }
     this.source = extractLumaAlpha(image);
+    this.rgba = image;
+    this.tuneTarget = null;
+    this.colorTargets.clear();
     this.grids.clear();
     this.reliefs.clear();
     this.paintCache = null;
@@ -133,14 +145,41 @@ export class EngineCore {
     return g;
   }
 
-  private relief(size: GridSize, relief: ReliefParams): Float32Array {
-    const key = reliefKey(size, relief);
-    let t = this.reliefs.get(key);
+  /** Source colours (OKLab) on a grid, for colour-driven heights. */
+  private colorTarget(size: GridSize): TuneTarget {
+    const key = `${size.width}x${size.height}`;
+    let t = this.colorTargets.get(key);
     if (!t) {
-      t = reliefField(this.grid(size), relief);
-      this.reliefs.set(key, t);
+      if (!this.rgba) throw new Error('No image loaded');
+      t = buildTuneTarget(this.rgba, size.width, size.height);
+      this.colorTargets.set(key, t);
     }
     return t;
+  }
+
+  /**
+   * Relief field t per pixel. With colorMatch > 0 the heights follow the
+   * colours of `color.stack` (see colorHeight.ts), so the stack is part of the key.
+   */
+  private relief(size: GridSize, relief: ReliefParams, color?: { stack: StackEntry[]; print: PrintParams }): Float32Array {
+    const lumaRelief = { ...relief, colorMatch: 0 };
+    const key = reliefKey(size, lumaRelief);
+    let t = this.reliefs.get(key);
+    if (!t) {
+      t = reliefField(this.grid(size), lumaRelief);
+      this.reliefs.set(key, t);
+    }
+    const cm = relief.colorMatch ?? 0;
+    if (!(cm > 0) || !color) return t;
+    const model = layerModelFor(color.print);
+    const lut = paintContext(color.stack, color.print, model, 1).colors;
+    const ckey = `${reliefKey(size, relief)}|${model.firstLayerHeightMm}|${model.layerHeightMm}|${model.baseThicknessMm}|${model.maxHeightMm}|${lut.join(',')}`;
+    let c = this.reliefs.get(ckey);
+    if (!c) {
+      c = colorHeightField(this.colorTarget(size), t, computeLayerField(t, model), lutToOklab(lut), model, cm);
+      this.reliefs.set(ckey, c);
+    }
+    return c;
   }
 
   /**
@@ -178,7 +217,8 @@ export class EngineCore {
     // histogram stays on the full-resolution field so stack auto-distribution
     // does not jump when the toggle changes.
     const cell = lineCell(params.simulateLineWidth, print, size.width / grid.width);
-    const t = this.painted(grid, params.relief, this.relief(grid, params.relief), params.paint, paintContext(params.paintStack ?? params.stack, print, model, cell));
+    const colorStack = { stack: params.paintStack ?? params.stack, print };
+    const t = this.painted(grid, params.relief, this.relief(grid, params.relief, colorStack), params.paint, paintContext(params.paintStack ?? params.stack, print, model, cell));
     const t2 = performance.now();
 
     const full = computeLayerField(t, model);
@@ -241,6 +281,32 @@ export class EngineCore {
     };
   }
 
+  /**
+   * Searches stack (and optionally tone) for the closest predicted print to
+   * the source image. Brush strokes are not taken into account.
+   */
+  autoTune(params: AutoTuneParams): AutoTuneResult {
+    const src = this.requireSource();
+    if (!this.rgba) throw new Error('No image loaded');
+    const { print } = params;
+    const model = layerModelFor(print);
+    const size = physicalSize(src, print);
+    const grid = previewGridSize(src.width, src.height, AUTOTUNE_MAX_EDGE);
+    const key = `${grid.width}x${grid.height}`;
+    if (this.tuneTarget?.key !== key) this.tuneTarget = { key, target: buildTuneTarget(this.rgba, grid.width, grid.height) };
+    const target = this.tuneTarget.target;
+    const cell = lineCell(params.simulateLineWidth, print, size.width / grid.width);
+    const lumaGrid = this.grid(grid);
+    return autoTune(params, {
+      model,
+      target,
+      fieldFor: (relief) => {
+        const t = reliefField(lumaGrid, { ...relief, colorMatch: 0 });
+        return cell > 1 ? computeLineLimitedLayerField(t, grid.width, grid.height, cell, model) : computeLayerField(t, model);
+      },
+    });
+  }
+
   export(params: ExportRequestParams): ExportResult {
     const t0 = performance.now();
     const src = this.requireSource();
@@ -250,7 +316,7 @@ export class EngineCore {
     const grid = exportGridSize(src.width, src.height, size.width, print.exportResolutionMm);
     this.grid(grid);
     const t1 = performance.now();
-    const t = applyPaint(this.relief(grid, params.relief), grid.width, grid.height, params.paint ?? [], paintContext(params.stack, print, model, lineCell(!!params.simulateLineWidth, print, size.width / grid.width)));
+    const t = applyPaint(this.relief(grid, params.relief, { stack: params.stack, print }), grid.width, grid.height, params.paint ?? [], paintContext(params.stack, print, model, lineCell(!!params.simulateLineWidth, print, size.width / grid.width)));
     const t2 = performance.now();
     if (params.orientation === 'faceDown') return this.exportFaceDown(params, t, grid, size, model, [t0, t1, t2]);
 

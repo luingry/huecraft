@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { autoDistributeStack, resolvePaintLayers, type PreviewParams, type PreviewResult, type SwapInfo } from '@huecraft/engine';
+import { autoDistributeStack, resolvePaintLayers, type AutoTuneOptions, type PreviewParams, type PreviewResult, type SwapInfo } from '@huecraft/engine';
 import { listFilaments, upsertFilament, type FilamentRecord } from '@huecraft/filament-db';
 import {
   createEmptyProject,
@@ -199,6 +199,7 @@ export function useWorkbench() {
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const [toast, setToast] = useState<Toast | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [tuning, setTuning] = useState(false);
   const [slicerTemplate, setSlicerTemplateState] = useState<SlicerTemplate | null>(null);
   // Preview-only: slots hidden here are skipped by the preview, never by exports.
   const [hiddenSlots, setHiddenSlots] = useState<string[]>([]);
@@ -454,6 +455,34 @@ export function useWorkbench() {
     );
   }, [result, updateStack]);
 
+  /** Experimental: search the settings whose predicted print is closest to the image (one undo step). */
+  const autoTune = useCallback(
+    async (options: AutoTuneOptions) => {
+      if (!image || !engine.client || tuning) {
+        if (!image) showToast(t.toast.needImage, 'error');
+        return;
+      }
+      setTuning(true);
+      showToast(t.autoTune.running, 'info', true);
+      try {
+        const res = await engine.client.autoTune({
+          relief: project.relief,
+          print: project.print,
+          stack: project.stack,
+          simulateLineWidth,
+          options: { ...options, timeBudgetMs: 6000 },
+        });
+        setProject((p) => ({ ...p, relief: res.relief, stack: normalizeStack(res.stack) }), 'auto-tune');
+        showToast(t.autoTune.done(res.errorBefore, res.errorAfter, res.ms), 'info', true);
+      } catch (e) {
+        showToast(`${t.autoTune.failed}: ${e instanceof Error ? e.message : String(e)}`, 'error');
+      } finally {
+        setTuning(false);
+      }
+    },
+    [image, engine.client, tuning, project.relief, project.print, project.stack, simulateLineWidth, setProject, showToast],
+  );
+
   const colorPresets = useMemo(
     () => (colorPresetsOpen && image ? readColorPresets(image.source, library, project.relief.invert) : null),
     [colorPresetsOpen, image, library, project.relief.invert],
@@ -690,6 +719,8 @@ export function useWorkbench() {
     rename,
     setSwapCommand,
     autoDistribute,
+    autoTune,
+    tuning,
     brushActive,
     setBrushActive,
     brush,

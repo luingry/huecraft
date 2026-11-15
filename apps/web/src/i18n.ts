@@ -39,6 +39,9 @@ export const t = {
     posterizeHint: 'Corta o relevo em degraus chapados (0 = desligado)',
     colorReading: 'Leitura de cor…',
     advanced: 'Ajuste fino',
+    colorMatch: 'Altura pela cor',
+    colorMatchOff: 'Desligado: a altura vem só do brilho',
+    colorMatchHint: 'Experimental: cada ponto escolhe a altura cuja cor impressa mais se parece com a da imagem (cores de mesmo brilho, como vermelho e azul-escuro, deixam de se confundir)',
   },
 
   size: {
@@ -228,6 +231,23 @@ export const t = {
     faceDownNoTemplate: 'Sem projeto-modelo, o 3MF sai sem cores: você atribui um filamento a cada parte no slicer. Configure o projeto-modelo em Filamentos para sair colorido.',
     cancel: 'Cancelar',
     confirm: 'Exportar',
+  },
+
+  autoTune: {
+    button: 'Auto-ajuste',
+    hint: 'Experimental: busca os ajustes cuja impressão prevista fica mais próxima da imagem',
+    swaps: 'Só as camadas de troca',
+    swapsHint: 'Mantém cores, ordem e tom',
+    order: 'Trocas e ordem das cores',
+    orderHint: 'Testa todas as ordens dos filamentos',
+    full: 'Trocas, ordem e tom',
+    fullHint: 'Também ajusta contraste, brilho, gama e inversão',
+    color: 'Trocas e ordem, altura pela cor',
+    colorHint: 'Liga a altura pela cor: preserva detalhes de cor que o brilho sozinho perde',
+    running: 'Procurando o melhor ajuste…',
+    done: (before: number, after: number, ms: number) =>
+      `Auto-ajuste: erro de cor ${before.toFixed(1)} → ${after.toFixed(1)} (${Math.round((1 - after / Math.max(before, 1e-9)) * 100)}% menor, ${(ms / 1000).toFixed(1)} s). Ctrl+Z desfaz.`,
+    failed: 'Falha no auto-ajuste',
   },
 
   toast: {

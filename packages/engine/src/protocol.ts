@@ -1,3 +1,4 @@
+import type { AutoTuneParams, AutoTuneResult } from './autotune.js';
 import type { PaintStroke, PrintOrientation, PrintParams, ReliefParams, StackEntry, SwapCommand } from '@huecraft/project-schema';
 
 /** Source image kept resident inside the worker. Sent once per import. */
@@ -110,10 +111,12 @@ export interface ExportResult {
 export type WorkerRequest =
   | { type: 'setImage'; id: number; image: SourceImage }
   | { type: 'preview'; id: number; params: PreviewParams }
-  | { type: 'export'; id: number; params: ExportRequestParams };
+  | { type: 'export'; id: number; params: ExportRequestParams }
+  | { type: 'autoTune'; id: number; params: AutoTuneParams };
 
 export type WorkerResponse =
   | { type: 'ok'; id: number }
   | { type: 'preview'; id: number; result: PreviewResult }
   | { type: 'export'; id: number; result: ExportResult }
+  | { type: 'autoTune'; id: number; result: AutoTuneResult }
   | { type: 'error'; id: number; message: string };

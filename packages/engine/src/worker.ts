@@ -40,6 +40,9 @@ self.onmessage = (ev: MessageEvent<WorkerRequest>) => {
         post({ type: 'preview', id: msg.id, result }, previewTransfer(result));
         break;
       }
+      case 'autoTune':
+        post({ type: 'autoTune', id: msg.id, result: core.autoTune(msg.params) });
+        break;
       case 'export': {
         const result = core.export(msg.params);
         post({ type: 'export', id: msg.id, result }, exportTransfer(result));
