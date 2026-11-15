@@ -54,8 +54,10 @@ export function ExportDialog({ wb }: { wb: Workbench }) {
           </button>
         ))}
       </div>
-      {choice === 'faceDown' && (kind === 'stl' || wb.slicerTemplate) && (
-        <p className="wb-orient__note">{kind === 'stl' ? t.exportDialog.faceDownStl : t.exportDialog.faceDownTemplate}</p>
+      {choice === 'faceDown' && (
+        <p className="wb-orient__note">
+          {kind === 'stl' ? t.exportDialog.faceDownStl : wb.slicerTemplate ? t.exportDialog.faceDownTemplate : t.exportDialog.faceDownNoTemplate}
+        </p>
       )}
     </Modal>
   );

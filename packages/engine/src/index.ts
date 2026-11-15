@@ -11,7 +11,7 @@ import { LatestWinsQueue } from './scheduler.js';
 
 export * from './protocol.js';
 export { EngineCore, runExport, runPreview, layerModelFor, physicalSize, plateauZ } from './core.js';
-export { buildFaceDownModel, faceDownPreview, formatFaceDownPlan, CLEAR_FILAMENT, type FaceDownPreview } from './faceDown.js';
+export { buildFaceDownModel, colourDepthMap, faceDownPreview, formatFaceDownPlan, CLEAR_FILAMENT, type FaceDownPreview } from './faceDown.js';
 export { PaintCanvas, applyPaint, paintTargetLayer, resolvePaintLayers } from './paint.js';
 export { autoDistributeStack, computeSwaps, formatSwapPlan, normalizeStack, type SwapPlanInput } from './stack.js';
 export { LatestWinsQueue, abortError, isAbortError } from './scheduler.js';

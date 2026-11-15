@@ -11,7 +11,7 @@ import {
 import { checkWatertight, signedVolume } from '@huecraft/mesh';
 import { paintTargetLayer, resolvePaintLayers } from './index.js';
 import type { PaintStroke } from '@huecraft/project-schema';
-import { autoDistributeStack, computeSwaps, EngineCore, formatSwapPlan, normalizeStack, runExport, runPreview } from './index.js';
+import { autoDistributeStack, colourDepthMap, computeSwaps, EngineCore, formatSwapPlan, normalizeStack, runExport, runPreview } from './index.js';
 import { LatestWinsQueue, isAbortError } from './scheduler.js';
 import type { PreviewParams, SourceImage } from './protocol.js';
 
@@ -511,5 +511,17 @@ describe('LatestWinsQueue', () => {
     await expect(q.request(1)).rejects.toThrow('boom');
     fail = false;
     await expect(q.request(2)).resolves.toBe(2);
+  });
+});
+
+describe('face-down colour depth', () => {
+  it('keeps at least two layers of the top colour where the band allows it', () => {
+    const map = colourDepthMap([entry('a', 0, '#000'), entry('b', 8, '#f00'), entry('c', 9, '#fff'), entry('d', 12, '#00f')], 19);
+    expect(map[3]).toBe(3);
+    expect(map[9]).toBe(9); // band b is a single layer: nothing to deepen
+    expect(map[10]).toBe(11); // one layer into band c → two
+    expect(map[11]).toBe(11);
+    expect(map[13]).toBe(14);
+    expect(map[19]).toBe(19);
   });
 });

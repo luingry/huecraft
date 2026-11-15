@@ -6,6 +6,8 @@ import {
   build3mfModel,
   buildBambuCustomGcodeXml,
   export3mf,
+  exportBambuPartsProject,
+  settingsWithFilaments,
   exportBinaryStl,
   PRUSA_CUSTOM_GCODE_PATH,
   PROJECT_SETTINGS_PATH,
@@ -92,5 +94,57 @@ describe('export3mf', () => {
 
   it('escapes swap messages', () => {
     expect(buildBambuCustomGcodeXml([{ ...swaps[0], message: '<a&b>' }])).toContain('extra="&lt;a&amp;b&gt;"');
+  });
+});
+
+describe('Bambu parts project', () => {
+  const settings: Record<string, unknown> = {
+    filament_settings_id: ['PLA'],
+    filament_type: ['PLA'],
+    filament_colour: ['#00AE42'],
+    nozzle_temperature: ['220'],
+    nozzle_diameter: ['0.4'],
+    filament_self_index: ['1'],
+    inherits_group: ['p', 'f', 'm'],
+    flush_volumes_matrix: Array.from({ length: 16 }, (_, i) => (i % 5 === 0 ? '0' : '280')),
+    flush_volumes_vector: Array(8).fill('1'),
+    printable_area: ['0x0', '256x0', '256x256', '0x256'],
+  };
+
+  it('grows every per-filament setting to the filaments needed', () => {
+    const s = settingsWithFilaments(settings, ['#ffffff', '#ff0000', '#000000', '#00ff00', '#0000ff']);
+    expect(s.filament_colour).toEqual(['#FFFFFF', '#FF0000', '#000000', '#00FF00', '#0000FF']);
+    expect(s.filament_settings_id).toEqual(Array(5).fill('PLA'));
+    expect(s.nozzle_temperature).toEqual(Array(5).fill('220'));
+    expect(s.filament_self_index).toEqual(['1', '2', '3', '4', '5']);
+    expect(s.inherits_group).toEqual(['p', 'f', 'f', 'f', 'f', 'f', 'm']);
+    expect(s.nozzle_diameter).toEqual(['0.4']);
+    expect(s.printable_area).toEqual(settings.printable_area);
+    expect((s.flush_volumes_matrix as string[]).length).toBe(25);
+    expect((s.flush_volumes_vector as string[]).length).toBe(10);
+  });
+
+  it('writes one part per filament with its extruder', () => {
+    const two = { positions: new Float32Array([...mesh.positions, ...mesh.positions]), indices: new Uint32Array([...mesh.indices, ...Array.from(mesh.indices, (i) => i + mesh.positions.length / 3)]), triangleCount: mesh.triangleCount * 2 };
+    const bytes = exportBambuPartsProject(two, {
+      name: 'fd',
+      template: { application: 'BambuStudio-02.08.03.66', settings: { ...settings, filament_settings_id: Array(30).fill('x').slice(0, 30) } },
+      volumes: [
+        { name: '1 · Clear', extruder: 1, firstTriangle: 0, lastTriangle: mesh.triangleCount - 1 },
+        { name: '2 · Red', extruder: 2, firstTriangle: mesh.triangleCount, lastTriangle: 2 * mesh.triangleCount - 1 },
+      ],
+      filamentColours: ['#e4ecf0', '#ff0000'],
+      layerHeightMm: 0.08,
+      firstLayerHeightMm: 0.16,
+      sizeMm: { width: 40, height: 40 },
+    });
+    const files = Object.fromEntries(Object.entries(unzipSync(bytes)).map(([k, v]) => [k, strFromU8(v)]));
+    expect(files['3D/3dmodel.model']).toContain('<metadata name="Application">BambuStudio-02.08.03.66</metadata>');
+    expect(files['3D/3dmodel.model'].match(/p:path="\/3D\/Objects\/object_1.model"/g)).toHaveLength(2);
+    expect(files['3D/Objects/object_1.model'].match(/<object id=/g)).toHaveLength(2);
+    expect(files['Metadata/model_settings.config']).toMatch(/<part id="2" subtype="normal_part">\s*<metadata key="name" value="2 · Red"\/>[\s\S]*?<metadata key="extruder" value="2"\/>/);
+    const project = JSON.parse(files[PROJECT_SETTINGS_PATH]);
+    expect(project.filament_colour.slice(0, 2)).toEqual(['#E4ECF0', '#FF0000']);
+    expect(project.layer_height).toBe('0.08');
   });
 });

@@ -25,7 +25,7 @@ import {
   type LayerModel,
 } from '@huecraft/optics';
 import { buildSolidHeightfieldMesh, buildTerracedMesh, buildTerracedSolidMesh } from '@huecraft/mesh';
-import { export3mf, exportBinaryStl, exportStlZip, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
+import { export3mf, exportBambuPartsProject, exportBinaryStl, exportStlZip, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
 import { buildFaceDownModel, formatFaceDownPlan } from './faceDown.js';
 import { applyPaint, LiveStroke, PaintCanvas, type PaintContext } from './paint.js';
 import type { PaintStroke, StackEntry } from '@huecraft/project-schema';
@@ -373,6 +373,7 @@ export class EngineCore {
     const base = safeFileName(params.name);
     let bytes: Uint8Array;
     let ext: string;
+    let slicerProject: string | undefined;
     if (params.format === 'stl') {
       ext = 'zip';
       bytes = exportStlZip(
@@ -381,17 +382,30 @@ export class EngineCore {
       );
     } else {
       ext = '3mf';
-      bytes = export3mf(fd.mesh, {
-        name: params.name,
-        volumes: fd.volumes,
-        attachments: { 'Metadata/hueCraft_swap_plan.txt': swapText },
-      });
+      const template = params.slicerTemplate ? readSlicerProjectTemplate(params.slicerTemplate) : null;
+      slicerProject = template?.application;
+      const attachments = { 'Metadata/hueCraft_swap_plan.txt': swapText };
+      // With the user's Bambu Studio / OrcaSlicer project the parts arrive on their
+      // filaments, in their colours; without it the slicer gets plain named parts.
+      bytes = template
+        ? exportBambuPartsProject(fd.mesh, {
+            name: params.name,
+            template,
+            volumes: fd.volumes,
+            filamentColours: fd.filaments.map((f) => f.colorHex),
+            layerHeightMm: print.layerHeightMm,
+            firstLayerHeightMm: print.firstLayerHeightMm,
+            sizeMm: size,
+            attachments,
+          })
+        : export3mf(fd.mesh, { name: params.name, volumes: fd.volumes, attachments });
     }
     const t4 = performance.now();
     return {
       bytes,
       fileName: `${base} (face down).${ext}`,
       mimeType: ext === 'zip' ? 'application/zip' : 'model/3mf',
+      ...(slicerProject ? { slicerProject } : {}),
       triangleCount: fd.mesh.triangleCount,
       swapText,
       timings: {

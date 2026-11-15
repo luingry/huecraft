@@ -62,11 +62,11 @@ export function Stage({
   const turned = useMemo(() => {
     if (!faceDown || tab !== '3d' || !res) return null;
     try {
-      return faceDownPreview(res, print);
+      return faceDownPreview(res, print, sortStack(wb.project.stack));
     } catch {
       return null;
     }
-  }, [faceDown, tab, res, print]);
+  }, [faceDown, tab, res, print, wb.project.stack]);
 
   const setBackdrop = (b: Backdrop) => {
     setBackdropState(b);

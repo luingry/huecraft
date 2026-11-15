@@ -599,12 +599,13 @@ export function useWorkbench() {
           format: kind,
           paint: resolvedPaint,
           simulateLineWidth,
-          slicerTemplate: kind === '3mf' && orient === 'faceUp' ? slicerTemplate?.bytes : undefined,
+          slicerTemplate: kind === '3mf' ? slicerTemplate?.bytes : undefined,
           orientation: orient,
         });
         const fileName = orient === 'faceDown' ? `${base} (face down).${kind === 'stl' ? 'zip' : kind}` : `${base}.${kind}`;
         const saved = await saveFile(res.bytes, fileName, res.mimeType);
         if (!saved) setToast(null);
+        else if (orient === 'faceDown' && kind === '3mf' && res.slicerProject) showToast(t.toast.exportedFaceDownProject(fileName));
         else if (orient === 'faceDown') showToast(t.toast.exportedFaceDown(fileName, faceDownPartOrder(project.stack)), 'info', true);
         else if (kind === '3mf' && result.swaps.length > 0 && !res.slicerProject)
           showToast(t.toast.exportedNoTemplate(fileName), 'info', true);

@@ -224,12 +224,14 @@ export const t = {
     faceDownDesc:
       'A imagem fica lisa, colada na mesa (acabamento da placa), atrás de uma janela de filamento transparente. Cada camada mistura filamentos: precisa de AMS / multimaterial.',
     faceDownStl: 'Em STL sai um .zip com um arquivo por filamento.',
-    faceDownTemplate: 'O projeto-modelo do Bambu Studio não é aplicado face para baixo: escolha a impressora e os filamentos no slicer.',
+    faceDownTemplate: 'Com o projeto-modelo, o 3MF já abre no Bambu Studio / Orca com cada parte no seu filamento e nas cores do projeto: é só trocar cada filamento por um da mesma cor.',
+    faceDownNoTemplate: 'Sem projeto-modelo, o 3MF sai sem cores: você atribui um filamento a cada parte no slicer. Configure o projeto-modelo em Filamentos para sair colorido.',
     cancel: 'Cancelar',
     confirm: 'Exportar',
   },
 
   toast: {
+    exportedFaceDownProject: (name: string) => `${name} salvo, com cada parte no seu filamento e cor.`,
     exportedFaceDown: (name: string, parts: string[]) =>
       `${name} salvo. No slicer, atribua um filamento a cada parte, na ordem: ${parts.map((p, i) => `${i + 1} = ${p}`).join(', ')}.`,
     clearFilament: 'Transparente',

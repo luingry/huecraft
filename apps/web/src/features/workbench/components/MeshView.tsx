@@ -552,11 +552,12 @@ export function MeshView({
     const v = viewer.current;
     if (!v) return;
     const m = result.mesh;
+    const src = faceDown ?? m;
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(faceDown ? faceDown.positions : m.positions, 3));
+    geo.setAttribute('position', new THREE.BufferAttribute(src.positions, 3));
     geo.setAttribute(
       'color',
-      new THREE.BufferAttribute(toLinear(colorMode === 'printed' ? m.printedColors : m.slicerColors), 3),
+      new THREE.BufferAttribute(toLinear(colorMode === 'printed' ? src.printedColors : src.slicerColors), 3),
     );
     geo.setIndex(new THREE.BufferAttribute(m.indices, 1));
     geo.computeVertexNormals();

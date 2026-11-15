@@ -96,8 +96,34 @@ export interface FaceDownInput {
   stack: StackEntry[];
 }
 
+/** Layers of its own colour every column keeps at the face: one layer is too translucent to read sharply. */
+export const FACE_DOWN_MIN_COLOUR_LAYERS = 2;
+
+/**
+ * Layer count each count becomes so the colour on top of the column is at
+ * least `minLayers` thick (index = face-up layer count). A column ending
+ * fewer layers into its band is raised within the band, keeping its colour;
+ * bands thinner than `minLayers` are left as they are.
+ */
+export function colourDepthMap(stack: StackEntry[], totalLayers: number, minLayers = FACE_DOWN_MIN_COLOUR_LAYERS): Uint16Array {
+  const map = new Uint16Array(totalLayers + 1);
+  const starts = stack.length > 0 ? stack.map((e) => e.startLayer) : [0];
+  for (let n = 0; n <= totalLayers; n++) {
+    map[n] = n;
+    if (n === 0) continue;
+    let b = 0;
+    for (let i = 1; i < starts.length; i++) if (starts[i] <= n - 1) b = i;
+    const start = starts[b];
+    const end = Math.min(totalLayers, b + 1 < starts.length ? starts[b + 1] : totalLayers);
+    if (n - start < minLayers && end - start >= minLayers) map[n] = start + minLayers;
+  }
+  return map;
+}
+
 export function buildFaceDownModel(input: FaceDownInput): FaceDownModel {
-  const { field, print, totalLayers: T, widthMm } = input;
+  const { print, totalLayers: T, widthMm } = input;
+  const depth = colourDepthMap(input.stack, T);
+  const field = input.field.map((n) => depth[n]);
   const table = flipTable(print, T);
   const grid = { width: input.width, height: input.height, widthMm, heightMm: input.heightMm };
   let maxN = 0;
@@ -182,15 +208,44 @@ export interface FaceDownPreview {
    * `result.mesh`). Shown face up, as the image looks once the print is turned over.
    */
   positions: Float32Array;
+  /** Colours with the export's minimum colour depth applied (see colourDepthMap). */
+  printedColors: Float32Array;
+  slicerColors: Float32Array;
   heightMm: number;
 }
 
-/** Face-down variant of the terraced preview mesh, built on the main thread from a preview result. */
-export function faceDownPreview(result: { totalLayers: number; mesh: { positions: Float32Array } }, print: PrintParams): FaceDownPreview {
-  const heightMm = plateau(print, result.totalLayers);
-  const positions = result.mesh.positions.slice();
-  for (let o = 2; o < positions.length; o += 3) if (positions[o] > 0) positions[o] = heightMm;
-  return { positions, heightMm };
+/**
+ * Face-down variant of the terraced preview mesh, built on the main thread
+ * from a preview result. The mesh is made of separate quads (4 vertices each),
+ * each coloured by the tallest column it belongs to.
+ */
+export function faceDownPreview(
+  result: { totalLayers: number; printedLut: Uint8Array; slicerLut: Uint8Array; mesh: { positions: Float32Array; printedColors: Float32Array; slicerColors: Float32Array } },
+  print: PrintParams,
+  stack: StackEntry[],
+): FaceDownPreview {
+  const T = result.totalLayers;
+  const heightMm = plateau(print, T);
+  const table = flipTable(print, T);
+  const depth = colourDepthMap(stack, T);
+  const src = result.mesh.positions;
+  const positions = src.slice();
+  const printedColors = result.mesh.printedColors.slice();
+  const slicerColors = result.mesh.slicerColors.slice();
+  for (let q = 0; q < src.length; q += 12) {
+    let k = 0;
+    for (let v = q + 2; v < q + 12; v += 3) k = Math.max(k, table.index.get(zKey(src[v])) ?? 0);
+    const c = depth[k] * 3;
+    for (let v = q; v < q + 12; v += 3) {
+      if (positions[v + 2] > 0) positions[v + 2] = heightMm;
+      if (k === 0) continue;
+      for (let ch = 0; ch < 3; ch++) {
+        printedColors[v + ch] = result.printedLut[c + ch] / 255;
+        slicerColors[v + ch] = result.slicerLut[c + ch] / 255;
+      }
+    }
+  }
+  return { positions, printedColors, slicerColors, heightMm };
 }
 
 /** Human-readable filament plan for a face-down export. */

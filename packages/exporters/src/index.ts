@@ -435,6 +435,184 @@ function patchedSettings(opts: ThreeMfOptions): string {
   return JSON.stringify(s, null, 4);
 }
 
+// Per-filament settings without the "filament_" prefix (Bambu Studio filament presets).
+const FILAMENT_KEYS = new Set([
+  'activate_air_filtration', 'additional_cooling_fan_speed', 'additional_fan_full_speed_layer', 'chamber_temperatures',
+  'circle_compensation_speed', 'close_additional_fan_first_x_layers', 'close_fan_the_first_x_layers',
+  'complete_print_exhaust_fan_speed', 'cool_plate_temp', 'cool_plate_temp_initial_layer', 'cooling_perimeter_transition_distance',
+  'cooling_slowdown_logic', 'counter_coef_1', 'counter_coef_2', 'counter_coef_3', 'counter_limit_max', 'counter_limit_min',
+  'diameter_limit', 'during_print_exhaust_fan_speed', 'eng_plate_temp', 'eng_plate_temp_initial_layer', 'fan_cooling_layer_time',
+  'fan_max_speed', 'fan_min_speed', 'full_fan_speed_layer', 'hole_coef_1', 'hole_coef_2', 'hole_coef_3', 'hole_limit_max',
+  'hole_limit_min', 'hot_plate_temp', 'hot_plate_temp_initial_layer', 'impact_strength_z', 'no_slow_down_for_cooling_on_outwalls',
+  'nozzle_temperature', 'nozzle_temperature_initial_layer', 'nozzle_temperature_range_high', 'nozzle_temperature_range_low',
+  'overhang_fan_speed', 'overhang_fan_threshold', 'override_process_overhang_speed', 'reduce_fan_stop_start_freq',
+  'required_nozzle_HRC', 'slow_down_for_layer_cooling', 'slow_down_layer_time', 'slow_down_min_speed', 'supertack_plate_temp',
+  'supertack_plate_temp_initial_layer', 'temperature_vitrification', 'textured_plate_temp', 'textured_plate_temp_initial_layer',
+  'volumetric_speed_coefficients',
+]);
+
+/** Number of filaments a Bambu Studio / OrcaSlicer project configuration defines. */
+export function templateFilamentCount(settings: Record<string, unknown>): number {
+  for (const k of ['filament_settings_id', 'filament_type', 'filament_colour']) {
+    const v = settings[k];
+    if (Array.isArray(v) && v.length > 0) return v.length;
+  }
+  return 1;
+}
+
+/**
+ * Configuration with exactly the given filament colours. Missing filaments
+ * copy the template's last one (every per-filament setting and the flush
+ * matrix grow with them); extra template filaments are kept.
+ */
+export function settingsWithFilaments(settings: Record<string, unknown>, colours: string[]): Record<string, unknown> {
+  const s: Record<string, unknown> = { ...settings };
+  const L = templateFilamentCount(settings);
+  const N = Math.max(L, colours.length);
+  if (N > L) {
+    for (const [k, v] of Object.entries(settings)) {
+      if (!Array.isArray(v) || v.length !== L || !(k.startsWith('filament_') || FILAMENT_KEYS.has(k))) continue;
+      const grown = [...v];
+      while (grown.length < N) grown.push(v[L - 1]);
+      s[k] = grown;
+    }
+    if (Array.isArray(settings['filament_self_index']) && (settings['filament_self_index'] as unknown[]).length === L) {
+      s['filament_self_index'] = Array.from({ length: N }, (_, i) => String(i + 1));
+    }
+    // Process, then one entry per filament, then printer.
+    for (const k of ['inherits_group', 'different_settings_to_system']) {
+      const v = settings[k];
+      if (!Array.isArray(v) || v.length !== L + 2) continue;
+      s[k] = [...v.slice(0, L + 1), ...Array.from({ length: N - L }, () => v[L]), v[L + 1]];
+    }
+  }
+  // One square block per extruder, its side the filament slots the slicer flushes
+  // between (at least N; some templates keep 4 slots for a single filament).
+  const extruders = Array.isArray(settings['nozzle_diameter']) ? (settings['nozzle_diameter'] as unknown[]).length : 1;
+  const matrix = settings['flush_volumes_matrix'];
+  const side = Array.isArray(matrix) ? Math.round(Math.sqrt(matrix.length / extruders)) : 0;
+  if (Array.isArray(matrix) && side > 0 && side * side * extruders === matrix.length && side < N) {
+    const high = String(Math.max(...matrix.map(Number)));
+    const out: string[] = [];
+    for (let e = 0; e < extruders; e++) {
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < N; j++) out.push(i < side && j < side ? String(matrix[e * side * side + i * side + j]) : i === j ? '0' : high);
+      }
+    }
+    s['flush_volumes_matrix'] = out;
+    const vector = settings['flush_volumes_vector'];
+    if (Array.isArray(vector) && vector.length === 2 * side) {
+      const grown = [...vector];
+      while (grown.length < 2 * N) grown.push(vector[2 * side - 2], vector[2 * side - 1]);
+      s['flush_volumes_vector'] = grown;
+    }
+  }
+  const current = Array.isArray(settings['filament_colour']) ? (settings['filament_colour'] as unknown[]) : [];
+  s['filament_colour'] = Array.from({ length: N }, (_, i) => (i < colours.length ? colours[i].toUpperCase() : String(current[i] ?? '#808080')));
+  return s;
+}
+
+export interface BambuPartsOptions {
+  name: string;
+  template: SlicerProjectTemplate;
+  /** Parts as triangle ranges of the mesh; `extruder` is the 1-based filament. */
+  volumes: MeshVolume[];
+  /** Colour per filament, index = extruder - 1. */
+  filamentColours: string[];
+  layerHeightMm: number;
+  firstLayerHeightMm: number;
+  sizeMm: { width: number; height: number };
+  attachments?: Record<string, string>;
+}
+
+/**
+ * Bambu Studio / OrcaSlicer project with one part per filament, each already
+ * assigned to its filament and the filaments coloured, laid out like the
+ * slicers' own files (parts in 3D/Objects, Metadata/model_settings.config).
+ * Needs a template: without a complete project configuration Bambu Studio
+ * crashes on files that carry model settings.
+ */
+export function exportBambuPartsProject(mesh: MeshData, opts: BambuPartsOptions): Uint8Array {
+  const { volumes, template } = opts;
+  const name = escapeXml(opts.name);
+  const assembly = volumes.length + 1;
+  const vertexCount = mesh.positions.length / 3;
+
+  const parts = new ByteWriter(vertexCount * 56 + mesh.triangleCount * 50 + 4096);
+  parts.ascii('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n <resources>\n');
+  const remap = new Int32Array(vertexCount);
+  volumes.forEach((v, i) => writeMeshObject(parts, i + 1, escapeXml(v.name), mesh.positions, mesh.indices, v.firstTriangle, v.lastTriangle, remap));
+  parts.ascii(' </resources>\n</model>\n');
+
+  const c = bedCentre(template.settings) ?? [opts.sizeMm.width / 2, opts.sizeMm.height / 2];
+  const tx = fmtZ(c[0] - opts.sizeMm.width / 2);
+  const ty = fmtZ(c[1] - opts.sizeMm.height / 2);
+  const root = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" requiredextensions="p">',
+    ` <metadata name="Application">${escapeXml(template.application)}</metadata>`,
+    ' <metadata name="BambuStudio:3mfVersion">1</metadata>',
+    ` <metadata name="Title">${name}</metadata>`,
+    ' <resources>',
+    `  <object id="${assembly}" type="model">`,
+    '   <components>',
+    ...volumes.map((_, i) => `    <component p:path="/3D/Objects/object_1.model" objectid="${i + 1}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>`),
+    '   </components>',
+    '  </object>',
+    ' </resources>',
+    ' <build>',
+    `  <item objectid="${assembly}" transform="1 0 0 0 1 0 0 0 1 ${tx} ${ty} 0" printable="1"/>`,
+    ' </build>',
+    '</model>',
+    '',
+  ].join('\n');
+
+  const settings = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<config>',
+    `  <object id="${assembly}">`,
+    `    <metadata key="name" value="${name}"/>`,
+    '    <metadata key="extruder" value="1"/>',
+    ...volumes.flatMap((v, i) => [
+      `    <part id="${i + 1}" subtype="normal_part">`,
+      `      <metadata key="name" value="${escapeXml(v.name)}"/>`,
+      '      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>',
+      `      <metadata key="extruder" value="${v.extruder}"/>`,
+      '    </part>',
+    ]),
+    '  </object>',
+    '  <plate>',
+    '    <metadata key="plater_id" value="1"/>',
+    '    <metadata key="plater_name" value=""/>',
+    '    <metadata key="locked" value="false"/>',
+    '    <model_instance>',
+    `      <metadata key="object_id" value="${assembly}"/>`,
+    '      <metadata key="instance_id" value="0"/>',
+    '    </model_instance>',
+    '  </plate>',
+    '</config>',
+    '',
+  ].join('\n');
+
+  const project = settingsWithFilaments(template.settings, opts.filamentColours);
+  project['layer_height'] = fmtZ(opts.layerHeightMm);
+  project['initial_layer_print_height'] = fmtZ(opts.firstLayerHeightMm);
+
+  const files: Record<string, Uint8Array> = {
+    '[Content_Types].xml': strToU8(CONTENT_TYPES),
+    '_rels/.rels': strToU8(RELS),
+    '3D/3dmodel.model': strToU8(root),
+    '3D/_rels/3dmodel.model.rels': strToU8(
+      '<?xml version="1.0" encoding="UTF-8"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n <Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n</Relationships>\n',
+    ),
+    '3D/Objects/object_1.model': parts.result(),
+    'Metadata/model_settings.config': strToU8(settings),
+    [PROJECT_SETTINGS_PATH]: strToU8(JSON.stringify(project, null, 4)),
+  };
+  for (const [path, text] of Object.entries(opts.attachments ?? {})) files[path] = strToU8(text);
+  return zipSync(files, { level: 1 });
+}
+
 /**
  * 3MF package: core-spec model plus filament-swap metadata for Bambu Studio /
  * OrcaSlicer and PrusaSlicer. Without a template the file is a plain geometry
