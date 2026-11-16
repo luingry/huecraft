@@ -13,7 +13,58 @@
  * `s` = ReliefParams.colorMatch in (0, 1]; s = 1 ignores luma entirely.
  */
 import { srgbToLinear, type LayerModel } from '@huecraft/optics';
+import { boxBlur, smoothingRadiusForGrid } from '@huecraft/image-core';
+import type { ReliefParams } from '@huecraft/project-schema';
 import type { TuneTarget } from './autotune.js';
+
+/** True when the relief's tone / smoothing leave the colour target as it is. */
+export function isNeutralTone(r: ReliefParams): boolean {
+  return (r.brightness ?? 0) === 0 && (r.contrast ?? 1) === 1 && (r.gamma ?? 1) === 1 && !(r.smoothing > 0);
+}
+
+/**
+ * The colour each pixel aims for in colour-driven heights: the source with the
+ * relief's brightness / contrast / gamma applied to OKLab lightness (same curve
+ * as the luma relief, chroma scaled along) and its smoothing as a blur. Without
+ * this those sliders would only move the luma pull, which colorMatch ≈ 1 all
+ * but ignores.
+ */
+export function adjustColorTarget(target: TuneTarget, relief: ReliefParams): TuneTarget {
+  if (isNeutralTone(relief)) return target;
+  const { width, height, lab, weight } = target;
+  const n = width * height;
+  const brightness = Number.isFinite(relief.brightness) ? relief.brightness : 0;
+  const contrast = Number.isFinite(relief.contrast) ? relief.contrast : 1;
+  const gamma = relief.gamma > 0 ? relief.gamma : 1;
+  const out = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const L = lab[i * 3];
+    let v = (L + brightness - 0.5) * contrast + 0.5;
+    v = v < 0 ? 0 : v > 1 ? 1 : v;
+    if (gamma !== 1) v = Math.pow(v, gamma);
+    const k = L > 0.02 ? Math.min(2, v / L) : 1;
+    out[i * 3] = v;
+    out[i * 3 + 1] = lab[i * 3 + 1] * k;
+    out[i * 3 + 2] = lab[i * 3 + 2] * k;
+  }
+  const r = smoothingRadiusForGrid(relief.smoothing, { width, height });
+  if (r > 0) {
+    // Alpha-weighted blur so transparent pixels do not darken their neighbours.
+    const w = Float32Array.from(weight);
+    const ch = [0, 1, 2].map((c) => {
+      const a = new Float32Array(n);
+      for (let i = 0; i < n; i++) a[i] = out[i * 3 + c] * weight[i];
+      boxBlur(a, width, height, r);
+      return a;
+    });
+    boxBlur(w, width, height, r);
+    for (let i = 0; i < n; i++) {
+      if (w[i] <= 1e-6) continue;
+      for (let c = 0; c < 3; c++) out[i * 3 + c] = ch[c][i] / w[i];
+    }
+  }
+  return { width, height, lab: out, weight };
+}
 
 /** Linear sRGB → OKLab, written at out[o..o+2]. */
 export function linToOklab(r: number, g: number, b: number, out: { [i: number]: number }, o: number): void {
@@ -61,6 +112,7 @@ export function colorHeightField(
   lutLab: Float64Array,
   model: LayerModel,
   strength: number,
+  posterize = 0,
 ): Float32Array {
   const s = strength > 1 ? 1 : strength;
   const pull = ((1 - s) * LUMA_PULL) / Math.max(1, model.totalLayers) ** 2;
@@ -93,6 +145,11 @@ export function colorHeightField(
       }
     }
     out[i] = tOf[best];
+  }
+  const steps = Math.floor(posterize);
+  if (steps >= 2) {
+    const s = steps - 1;
+    for (let i = 0; i < out.length; i++) out[i] = Math.round(out[i] * s) / s;
   }
   return out;
 }

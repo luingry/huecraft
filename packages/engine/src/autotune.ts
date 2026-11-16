@@ -15,7 +15,7 @@
  */
 import type { PrintParams, ReliefParams, StackEntry } from '@huecraft/project-schema';
 import { hexToRgb, layerOpacity, srgbToLinear, type LayerModel } from '@huecraft/optics';
-import { linToOklab, LUMA_PULL } from './colorHeight.js';
+import { adjustColorTarget, linToOklab, LUMA_PULL } from './colorHeight.js';
 
 export interface AutoTuneOptions {
   /** Also try every order of the filaments (≤ 6 filaments). */
@@ -177,7 +177,8 @@ function printedLab(fils: Fil[], order: number[], starts: number[], total: numbe
 class ColorScorer implements Scorer {
   evaluations = 0;
   private labs: Float64Array;
-  private bins: { w: Float64Array; lab: Float64Array; nl: Uint16Array; count: number };
+  /** `lab`: the colour each bin aims for (tone applied); `orig`: the source colour the error is reported against. */
+  private bins: { w: Float64Array; lab: Float64Array; orig: Float64Array; nl: Uint16Array; count: number };
   private wSum = 0;
   private pull: number;
   private lastColor = 0;
@@ -188,6 +189,8 @@ class ColorScorer implements Scorer {
     lumaCounts: Uint16Array,
     readonly strength: number,
     readonly hist: Uint32Array,
+    /** Tone-adjusted target the heights follow (defaults to `target`). */
+    aim: TuneTarget = target,
   ) {
     this.labs = new Float64Array((model.totalLayers + 1) * 3);
     this.pull = ((1 - strength) * LUMA_PULL) / Math.max(1, model.totalLayers) ** 2;
@@ -195,13 +198,14 @@ class ColorScorer implements Scorer {
     const map = new Map<number, number>();
     const w: number[] = [];
     const lab: number[] = [];
+    const orig: number[] = [];
     const nl: number[] = [];
     for (let i = 0; i < lumaCounts.length; i++) {
       const wi = target.weight[i];
       if (wi < 0.5) continue;
-      const L = target.lab[i * 3];
-      const A = target.lab[i * 3 + 1];
-      const B = target.lab[i * 3 + 2];
+      const L = aim.lab[i * 3];
+      const A = aim.lab[i * 3 + 1];
+      const B = aim.lab[i * 3 + 2];
       const key = ((Math.round(L * Q) * 128 + Math.round(A * Q) + 64) * 128 + Math.round(B * Q) + 64) * 2048 + lumaCounts[i];
       let k = map.get(key);
       if (k === undefined) {
@@ -209,16 +213,22 @@ class ColorScorer implements Scorer {
         map.set(key, k);
         w.push(0);
         lab.push(0, 0, 0);
+        orig.push(0, 0, 0);
         nl.push(lumaCounts[i]);
       }
       w[k] += wi;
       lab[k * 3] += wi * L;
       lab[k * 3 + 1] += wi * A;
       lab[k * 3 + 2] += wi * B;
+      for (let c = 0; c < 3; c++) orig[k * 3 + c] += wi * target.lab[i * 3 + c];
       this.wSum += wi;
     }
-    for (let k = 0; k < w.length; k++) for (let c = 0; c < 3; c++) lab[k * 3 + c] /= w[k] || 1;
-    this.bins = { w: Float64Array.from(w), lab: Float64Array.from(lab), nl: Uint16Array.from(nl), count: w.length };
+    for (let k = 0; k < w.length; k++)
+      for (let c = 0; c < 3; c++) {
+        lab[k * 3 + c] /= w[k] || 1;
+        orig[k * 3 + c] /= w[k] || 1;
+      }
+    this.bins = { w: Float64Array.from(w), lab: Float64Array.from(lab), orig: Float64Array.from(orig), nl: Uint16Array.from(nl), count: w.length };
   }
 
   score(order: number[], starts: number[]): number {
@@ -229,7 +239,7 @@ class ColorScorer implements Scorer {
     const labs = this.labs;
     const s = this.strength;
     const pull = this.pull;
-    const { w, lab, nl, count } = this.bins;
+    const { w, lab, orig, nl, count } = this.bins;
     let total = 0;
     let color = 0;
     for (let k = 0; k < count; k++) {
@@ -238,7 +248,7 @@ class ColorScorer implements Scorer {
       const B = lab[k * 3 + 2];
       const n0 = nl[k];
       let best = Infinity;
-      let bestD = 0;
+      let bestN = n0;
       for (let n = lo; n <= hi; n++) {
         const dl = labs[n * 3] - L;
         const da = labs[n * 3 + 1] - A;
@@ -248,11 +258,14 @@ class ColorScorer implements Scorer {
         const c = s * d + pull * dn * dn;
         if (c < best) {
           best = c;
-          bestD = d;
+          bestN = n;
         }
       }
       total += w[k] * best;
-      color += w[k] * bestD;
+      const ol = labs[bestN * 3] - orig[k * 3];
+      const oa = labs[bestN * 3 + 1] - orig[k * 3 + 1];
+      const ob = labs[bestN * 3 + 2] - orig[k * 3 + 2];
+      color += w[k] * (ol * ol + oa * oa + ob * ob);
     }
     this.lastColor = color / this.wSum;
     return total / this.wSum;
@@ -552,7 +565,7 @@ export function autoTune(params: AutoTuneParams, ctx: AutoTuneContext): AutoTune
     const counts = ctx.fieldFor(relief);
     const stats = layerStats(counts, target, model.totalLayers);
     const cm = relief.colorMatch ?? 0;
-    return cm > 0 ? new ColorScorer(fils, model, target, counts, Math.min(1, cm), stats.hist) : new StackScorer(fils, stats);
+    return cm > 0 ? new ColorScorer(fils, model, target, counts, Math.min(1, cm), stats.hist, adjustColorTarget(target, relief)) : new StackScorer(fils, stats);
   };
 
   // Before: the settings exactly as given.

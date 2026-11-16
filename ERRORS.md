@@ -60,3 +60,9 @@
 - **Symptom:** small saturated details (red text on the ÖSPIEL cover) print as the surrounding dark colour; no stack, swap layer or tone setting (auto-tune included) brings them back.
 - **Cause:** the relief height comes from luma only. The red text (luma 0.2–0.3) shares its luma band with the dark-blue background, so both get the same layer count and therefore the same printed colour. Auto-tune's area-weighted error also barely notices a detail covering ~2 % of the image.
 - **Fix:** colour-driven heights (`ReliefParams.colorMatch`, `packages/engine/src/colorHeight.ts`): each pixel picks the layer count whose printed colour best matches it in OKLab, pulled towards the luma height by `1 - colorMatch`. Auto-tune scores this mode with a binned per-pixel argmin (`ColorScorer`). The relief then depends on the stack, so its cache key includes the printed LUT.
+
+## Tone sliders do almost nothing after auto-tune "Cor"
+
+- **Symptom:** after auto-tune in colour mode (colorMatch 0.95), contrast / brightness / gamma / smoothing / posterize barely change the print.
+- **Cause:** in colour mode each pixel matches the *raw* source colour; the tone settings only moved the luma pull target, whose weight is `(1 - colorMatch)` ≈ 0.05. Brightness / gamma were also hidden in the simple profile even when auto-tune had set them.
+- **Fix:** `adjustColorTarget` applies brightness / contrast / gamma to OKLab L (chroma scaled along) and smoothing as an alpha-weighted blur to the colour target; `colorHeightField` posterizes its output. Auto-tune's `ColorScorer` picks heights from the adjusted target but reports error against the original. Brightness / gamma sliders stay visible in the simple profile once they leave their defaults.

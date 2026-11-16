@@ -145,4 +145,24 @@ describe('colour-driven heights', () => {
     expect(color.relief.colorMatch).toBe(0.95);
     expect(color.errorAfter).toBeLessThan(luma.errorAfter);
   });
+
+  it('brightness and gamma still move the heights in colour mode', () => {
+    // Horizontal grey ramp: the colour match follows it, the tone should shift it.
+    const w = 64, h = 8;
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const v = Math.round(((i % w) / (w - 1)) * 255);
+      rgba.set([v, v, v, 255], i * 4);
+    }
+    const st = [entry('k', 0, '#101010', 0.5), entry('w', 4, '#f0f0f0', 1.5)];
+    const core = new EngineCore();
+    core.setImage({ width: w, height: h, rgba });
+    const base = { relief: { ...DEFAULT_RELIEF, colorMatch: 0.95 }, print, stack: st, maxEdge: 64, simulateLineWidth: false };
+    const sum = (r: { layerField: Uint16Array }) => r.layerField.reduce((a, b) => a + b, 0);
+    const plain = sum(core.preview(base));
+    const bright = sum(core.preview({ ...base, relief: { ...base.relief, brightness: 0.25 } }));
+    const dark = sum(core.preview({ ...base, relief: { ...base.relief, gamma: 2 } }));
+    expect(bright).toBeGreaterThan(plain * 1.05);
+    expect(dark).toBeLessThan(plain * 0.95);
+  });
 });

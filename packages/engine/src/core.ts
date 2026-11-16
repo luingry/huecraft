@@ -26,7 +26,7 @@ import {
 } from '@huecraft/optics';
 import { buildSolidHeightfieldMesh, buildTerracedMesh, buildTerracedSolidMesh } from '@huecraft/mesh';
 import { export3mf, exportBambuPartsProject, exportBinaryStl, exportStlZip, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
-import { colorHeightField, lutToOklab } from './colorHeight.js';
+import { adjustColorTarget, colorHeightField, isNeutralTone, lutToOklab } from './colorHeight.js';
 import { autoTune, buildTuneTarget, type AutoTuneParams, type AutoTuneResult, type TuneTarget } from './autotune.js';
 import { buildFaceDownModel, formatFaceDownPlan } from './faceDown.js';
 import { applyPaint, LiveStroke, PaintCanvas, type PaintContext } from './paint.js';
@@ -107,7 +107,7 @@ export class EngineCore {
   /** Original pixels, kept for auto-tune's colour target. */
   private rgba: SourceImage | null = null;
   private tuneTarget: { key: string; target: TuneTarget } | null = null;
-  private colorTargets = new Lru<TuneTarget>(3);
+  private colorTargets = new Lru<TuneTarget>(6);
   private grids = new Lru<LumaAlpha>(3);
   private reliefs = new Lru<Float32Array>(4);
   private paintCache: { key: string; base: Float32Array; canvas: PaintCanvas } | null = null;
@@ -145,8 +145,8 @@ export class EngineCore {
     return g;
   }
 
-  /** Source colours (OKLab) on a grid, for colour-driven heights. */
-  private colorTarget(size: GridSize): TuneTarget {
+  /** Source colours (OKLab) on a grid, with the relief's tone applied, for colour-driven heights. */
+  private colorTarget(size: GridSize, relief: ReliefParams): TuneTarget {
     const key = `${size.width}x${size.height}`;
     let t = this.colorTargets.get(key);
     if (!t) {
@@ -154,7 +154,14 @@ export class EngineCore {
       t = buildTuneTarget(this.rgba, size.width, size.height);
       this.colorTargets.set(key, t);
     }
-    return t;
+    if (isNeutralTone(relief)) return t;
+    const tkey = `${key}|${relief.brightness}|${relief.contrast}|${relief.gamma}|${relief.smoothing}`;
+    let a = this.colorTargets.get(tkey);
+    if (!a) {
+      a = adjustColorTarget(t, relief);
+      this.colorTargets.set(tkey, a);
+    }
+    return a;
   }
 
   /**
@@ -176,7 +183,7 @@ export class EngineCore {
     const ckey = `${reliefKey(size, relief)}|${model.firstLayerHeightMm}|${model.layerHeightMm}|${model.baseThicknessMm}|${model.maxHeightMm}|${lut.join(',')}`;
     let c = this.reliefs.get(ckey);
     if (!c) {
-      c = colorHeightField(this.colorTarget(size), t, computeLayerField(t, model), lutToOklab(lut), model, cm);
+      c = colorHeightField(this.colorTarget(size, relief), t, computeLayerField(t, model), lutToOklab(lut), model, cm, relief.posterize ?? 0);
       this.reliefs.set(ckey, c);
     }
     return c;

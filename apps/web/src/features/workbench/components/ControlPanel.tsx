@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { baseLayerCount } from '@huecraft/project-schema';
 import { Button, Section, Slider, Subgroup, Switch } from '@huecraft/design-system';
 import { formatMm, t } from '../../../i18n';
@@ -8,6 +9,34 @@ export function ControlPanel({ wb, onPickImage }: { wb: Workbench; onPickImage: 
   const advanced = wb.profile === 'advanced';
   const { relief, print } = wb.project;
   const aspect = wb.image ? wb.image.source.height / wb.image.source.width : null;
+  // Auto-tune can set brightness / gamma: once they leave their defaults keep
+  // their sliders on screen (also in the simple profile) so the result can be
+  // edited from where it landed, even when dragged back to the default.
+  const toneSet = relief.brightness !== 0 || relief.gamma !== 1;
+  const [showTone, setShowTone] = useState(toneSet);
+  useEffect(() => {
+    if (toneSet) setShowTone(true);
+  }, [toneSet]);
+  const toneSliders = (
+    <>
+      <Slider
+        label={t.image.brightness}
+        value={relief.brightness}
+        min={-0.5}
+        max={0.5}
+        step={0.01}
+        onChange={(brightness) => wb.updateRelief({ brightness })}
+      />
+      <Slider
+        label={t.image.gamma}
+        value={relief.gamma}
+        min={0.4}
+        max={2.5}
+        step={0.05}
+        onChange={(gamma) => wb.updateRelief({ gamma })}
+      />
+    </>
+  );
 
   return (
     <aside className="wb-controls">
@@ -54,24 +83,10 @@ export function ControlPanel({ wb, onPickImage }: { wb: Workbench; onPickImage: 
           checked={relief.invert}
           onChange={(invert) => wb.updateRelief({ invert })}
         />
+        {!advanced && showTone && toneSliders}
         {advanced && (
           <Subgroup title={t.image.advanced}>
-            <Slider
-              label={t.image.brightness}
-              value={relief.brightness}
-              min={-0.5}
-              max={0.5}
-              step={0.01}
-              onChange={(brightness) => wb.updateRelief({ brightness })}
-            />
-            <Slider
-              label={t.image.gamma}
-              value={relief.gamma}
-              min={0.4}
-              max={2.5}
-              step={0.05}
-              onChange={(gamma) => wb.updateRelief({ gamma })}
-            />
+            {toneSliders}
             <Slider
               label={t.image.smoothing}
               value={relief.smoothing}
