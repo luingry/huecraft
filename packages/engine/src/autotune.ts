@@ -15,7 +15,7 @@
  */
 import type { PrintParams, ReliefParams, StackEntry } from '@huecraft/project-schema';
 import { hexToRgb, layerOpacity, srgbToLinear, type LayerModel } from '@huecraft/optics';
-import { adjustColorTarget, linToOklab, LUMA_PULL } from './colorHeight.js';
+import { adjustColorTarget, isNeutralTone, linToOklab, LUMA_PULL } from './colorHeight.js';
 
 export interface AutoTuneOptions {
   /** Also try every order of the filaments (≤ 6 filaments). */
@@ -576,6 +576,22 @@ export function autoTune(params: AutoTuneParams, ctx: AutoTuneContext): AutoTune
   let sc0 = scorerFor(relief);
   let best = searchStack(sc0, model, n, { order: identity, starts: initStarts, err: Infinity }, params.options.reorder, deadline);
   evaluations += sc0.evaluations;
+
+  // Colour mode aims at the tone-adjusted image, so a contrast / gamma left
+  // over from a luma tune or a manual edit drags the result towards black and
+  // white. Also try the untouched image (neutral tone) and keep whichever
+  // prints closer to the source.
+  if (colorMode && !isNeutralTone({ ...relief, smoothing: 0 })) {
+    const neutral: ReliefParams = { ...relief, brightness: 0, contrast: 1, gamma: 1 };
+    const sc1 = scorerFor(neutral);
+    const alt = searchStack(sc1, model, n, best, params.options.reorder, Math.max(deadline, performance.now() + 1500));
+    evaluations += sc1.evaluations;
+    if (sc1.colorMse(alt.order, alt.starts) < sc0.colorMse(best.order, best.starts)) {
+      relief = neutral;
+      sc0 = sc1;
+      best = alt;
+    }
+  }
 
   if (params.options.tone && !colorMode && n >= 1) {
     for (let round = 0; round < 2 && performance.now() < deadline; round++) {

@@ -146,6 +146,21 @@ describe('colour-driven heights', () => {
     expect(color.errorAfter).toBeLessThan(luma.errorAfter);
   });
 
+  it('colour auto-tune drops a leftover contrast that pulls the print to black and white', () => {
+    const w = 40, h = 20;
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) rgba.set(i % w < w / 2 ? [200, 20, 30, 255] : [20, 60, 175, 255], i * 4);
+    const st = [entry('k', 0, '#101010', 0.5), entry('b', 4, '#1f3fb0', 0.8), entry('r', 9, '#c81e28', 0.8), entry('w', 14, '#f0f0f0', 1.5)];
+    const core = new EngineCore();
+    core.setImage({ width: w, height: h, rgba });
+    const p = { print, stack: st, simulateLineWidth: false, options: { reorder: true, tone: false, colorMatch: 0.95 } };
+    const clean = core.autoTune({ ...p, relief: DEFAULT_RELIEF });
+    const harsh = core.autoTune({ ...p, relief: { ...DEFAULT_RELIEF, contrast: 3, gamma: 0.5 } });
+    expect(harsh.relief.contrast).toBe(1);
+    expect(harsh.relief.gamma).toBe(1);
+    expect(harsh.errorAfter).toBeLessThanOrEqual(clean.errorAfter + 1e-6);
+  });
+
   it('brightness and gamma still move the heights in colour mode', () => {
     // Horizontal grey ramp: the colour match follows it, the tone should shift it.
     const w = 64, h = 8;
