@@ -32,7 +32,7 @@ import { buildFaceDownModel, formatFaceDownPlan } from './faceDown.js';
 import { applyPaint, LiveStroke, PaintCanvas, type PaintContext } from './paint.js';
 import type { PaintStroke, StackEntry } from '@huecraft/project-schema';
 import type { ExportRequestParams, ExportResult, PreviewParams, PreviewResult, SourceImage } from './protocol.js';
-import { computeSwaps, FALLBACK_FILAMENT, formatSwapPlan, layerFilaments, normalizeStack } from './stack.js';
+import { amsSlots, computeSwaps, FALLBACK_FILAMENT, formatSwapPlan, layerFilaments, normalizeStack } from './stack.js';
 
 /** Longest edge of the grid auto-tune compares on (colour error is judged from a distance). */
 const AUTOTUNE_MAX_EDGE = 240;
@@ -377,9 +377,11 @@ export class EngineCore {
     } else {
       const template = params.slicerTemplate ? readSlicerProjectTemplate(params.slicerTemplate) : null;
       slicerProject = template?.application;
+      const ams = params.swapCommand === 'ams' ? amsSlots(stack) : null;
       const slicerSwaps: SlicerSwap[] = swaps.map((s) => ({
         topZMm: s.topZMm,
         kind: params.swapCommand,
+        ...(ams ? { extruder: ams.slotOf.get(s.slotId) ?? 1 } : {}),
         colorHex: s.colorHex,
         message: `Load ${s.filamentName}`,
       }));
@@ -391,6 +393,7 @@ export class EngineCore {
         layerHeightMm: print.layerHeightMm,
         firstLayerHeightMm: print.firstLayerHeightMm,
         firstFilamentHex: (stack[0]?.filament ?? FALLBACK_FILAMENT).colorHex,
+        ...(ams ? { filamentColours: ams.colours } : {}),
         sizeMm: size,
       });
     }

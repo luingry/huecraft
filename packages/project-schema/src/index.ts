@@ -67,8 +67,12 @@ export interface StackFilament {
   tdMm: number;
 }
 
-/** How a filament swap is written into the exported 3MF. */
-export type SwapCommand = 'pause' | 'color-change';
+/**
+ * How a filament swap is written into the exported 3MF. 'pause' / 'color-change'
+ * stop for a manual swap; 'ams' switches filament automatically (one filament
+ * slot per colour of the stack, multi-material unit such as a Bambu AMS).
+ */
+export type SwapCommand = 'pause' | 'color-change' | 'ams';
 
 /**
  * How the print lies on the bed. 'faceUp': the image is the top relief, colours

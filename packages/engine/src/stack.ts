@@ -56,6 +56,23 @@ export function computeSwaps(stack: StackEntry[], print: PrintParams, totalLayer
   return swaps;
 }
 
+/**
+ * Filament slots for automatic ('ams') swaps: one per distinct filament of the
+ * stack, numbered 1.. in stack order, so a filament used twice keeps its slot.
+ * `colours[i]` is the colour of slot i + 1.
+ */
+export function amsSlots(stack: StackEntry[]): { slotOf: Map<string, number>; colours: string[] } {
+  const slotOf = new Map<string, number>();
+  const colours: string[] = [];
+  for (const e of stack) {
+    if (slotOf.has(e.slotId)) continue;
+    colours.push(e.filament.colorHex);
+    slotOf.set(e.slotId, colours.length);
+  }
+  if (colours.length === 0) colours.push(FALLBACK_FILAMENT.colorHex);
+  return { slotOf, colours };
+}
+
 export function round4(v: number): number {
   return Math.round(v * 10000) / 10000;
 }
@@ -106,6 +123,12 @@ export function autoDistributeStack(
   return stack.map((e, i) => ({ ...e, startLayer: starts[i] }));
 }
 
+const SWAP_COMMAND_LABEL: Record<SwapCommand, string> = {
+  pause: 'pause (Bambu M400 U1 / M601)',
+  'color-change': 'colour change (M600)',
+  ams: 'automatic filament change (AMS / multi-material, one slot per filament)',
+};
+
 export interface SwapPlanInput {
   name: string;
   print: PrintParams;
@@ -127,15 +150,17 @@ export function formatSwapPlan(input: SwapPlanInput): string {
     `Size: ${f2(input.sizeMm.width)} × ${f2(input.sizeMm.height)} × ${f2(input.sizeMm.z)} mm`,
     `Layer height: ${f3(print.layerHeightMm)} mm, first layer: ${f3(print.firstLayerHeightMm)} mm, total layers: ${input.totalLayers}`,
     `Base: ${input.baseLayers} layers (to Z ${f3(layerTopZ(print, input.baseLayers - 1))} mm)`,
-    `Swap command: ${input.swapCommand === 'pause' ? 'pause (Bambu M400 U1 / M601)' : 'colour change (M600)'}`,
+    `Swap command: ${SWAP_COMMAND_LABEL[input.swapCommand]}`,
     'Set the same layer height and first layer height in the slicer.',
     '',
   ];
+  const ams = input.swapCommand === 'ams' ? amsSlots(stack) : null;
+  const slot = (slotId: string | undefined) => (ams ? ` [AMS slot ${ams.slotOf.get(slotId ?? '') ?? 1}]` : '');
   const first = stack[0]?.filament ?? FALLBACK_FILAMENT;
-  lines.push(`Layer 1 (Z ${f3(layerTopZ(print, 0))} mm) → start with "${first.name}" ${first.colorHex}`);
-  const verb = input.swapCommand === 'pause' ? 'pause, load' : 'colour change to';
+  lines.push(`Layer 1 (Z ${f3(layerTopZ(print, 0))} mm) → start with "${first.name}" ${first.colorHex}${slot(stack[0]?.slotId)}`);
+  const verb = { pause: 'pause, load', 'color-change': 'colour change to', ams: 'switch to' }[input.swapCommand];
   for (const s of swaps) {
-    lines.push(`Layer ${s.slicerLayer} (Z ${f3(s.topZMm)} mm) → ${verb} "${s.filamentName}" ${s.colorHex}`);
+    lines.push(`Layer ${s.slicerLayer} (Z ${f3(s.topZMm)} mm) → ${verb} "${s.filamentName}" ${s.colorHex}${slot(s.slotId)}`);
   }
   if (swaps.length === 0) lines.push('No filament swaps.');
   lines.push('');

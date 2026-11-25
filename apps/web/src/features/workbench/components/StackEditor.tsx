@@ -352,12 +352,19 @@ export function StackEditor({ wb, advanced }: { wb: Workbench; advanced: boolean
             value={wb.project.export.swapCommand}
             onChange={wb.setSwapCommand}
             options={[
+              { value: 'ams', label: t.stack.ams },
               { value: 'pause', label: t.stack.pause },
               { value: 'color-change', label: t.stack.colorChange },
             ]}
           />
           <span className="hc-field__hint">
-            {wb.project.export.swapCommand === 'pause' ? t.stack.pauseHint : t.stack.colorChangeHint}
+            {
+              {
+                ams: t.stack.amsHint(new Set(wb.project.stack.map((e) => e.slotId)).size),
+                pause: t.stack.pauseHint,
+                'color-change': t.stack.colorChangeHint,
+              }[wb.project.export.swapCommand]
+            }
           </span>
         </div>
       )}

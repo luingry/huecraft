@@ -155,6 +155,15 @@ export function formatSwapPlanText(project: HueCraftProject, result: PreviewResu
     '',
     `Camada 1 (Z ${p.firstLayerHeightMm.toFixed(2)} mm): comece com ${project.stack[0]?.filament.name ?? '?'} ${project.stack[0]?.filament.colorHex ?? ''}`,
   ];
+  if (project.export.swapCommand === 'ams') {
+    const slots = new Map<string, number>();
+    for (const e of project.stack) if (!slots.has(e.slotId)) slots.set(e.slotId, slots.size + 1);
+    lines[lines.length - 1] += ` (AMS slot 1)`;
+    for (const s of result.swaps) {
+      lines.push(`Camada ${s.slicerLayer} (Z ${s.topZMm.toFixed(2)} mm): troca automática para ${s.filamentName} ${s.colorHex} (AMS slot ${slots.get(s.slotId) ?? 1})`);
+    }
+    return lines.join('\r\n') + '\r\n';
+  }
   for (const s of result.swaps) {
     lines.push(
       `Camada ${s.slicerLayer} (Z ${s.topZMm.toFixed(2)} mm): pause ao terminar Z ${s.pauseAtZMm.toFixed(2)} mm e carregue ${s.filamentName} ${s.colorHex}`,

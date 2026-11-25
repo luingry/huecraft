@@ -136,7 +136,7 @@ export function readPrinterDefaults(): PrinterDefaults | null {
     const parsed = JSON.parse(raw) as Partial<PrinterDefaults>;
     return {
       print: { ...DEFAULT_PRINT, ...parsed.print },
-      swapCommand: parsed.swapCommand === 'color-change' ? 'color-change' : 'pause',
+      swapCommand: parsed.swapCommand === 'color-change' || parsed.swapCommand === 'ams' ? parsed.swapCommand : 'pause',
     };
   } catch {
     return null;

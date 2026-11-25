@@ -92,6 +92,25 @@ describe('export3mf', () => {
     expect(readSlicerProjectTemplate(zipSync({ '3D/3dmodel.model': strToU8('<model/>') }))).toBeNull();
   });
 
+  it('writes AMS swaps as per-layer filament changes with one filament per slot', () => {
+    const settings: Record<string, unknown> = { filament_settings_id: ['PLA'], filament_colour: ['#00AE42'], printable_area: ['0x0', '256x0', '256x256', '0x256'] };
+    for (let i = 0; i < 30; i++) settings[`k${i}`] = String(i);
+    const template = { application: 'BambuStudio-02.08.03.66', settings };
+    const ams: SlicerSwap[] = [
+      { topZMm: 0.64, kind: 'ams', extruder: 2, colorHex: '#7a7a7a', message: 'Load Gray' },
+      { topZMm: 1.2, kind: 'ams', extruder: 3, colorHex: '#ffffff', message: 'Load White' },
+    ];
+    const files = unzipSync(export3mf(mesh, { swaps: ams, template, filamentColours: ['#000000', '#7a7a7a', '#ffffff'], firstFilamentHex: '#000000' }));
+    const bambu = strFromU8(files[BAMBU_CUSTOM_GCODE_PATH]);
+    expect(bambu).toContain('<layer top_z="0.64" type="2" extruder="2" color="#7a7a7a" extra="" gcode="tool_change"/>');
+    expect(bambu).toContain('<layer top_z="1.2" type="2" extruder="3" color="#ffffff" extra="" gcode="tool_change"/>');
+    expect(bambu).toContain('<mode value="MultiAsSingle"/>');
+    expect(strFromU8(files[PRUSA_CUSTOM_GCODE_PATH])).toContain('<code print_z="0.64" type="2" extruder="2"');
+    const cfg = JSON.parse(strFromU8(files[PROJECT_SETTINGS_PATH]));
+    expect(cfg.filament_colour).toEqual(['#000000', '#7A7A7A', '#FFFFFF']);
+    expect(cfg.filament_settings_id).toEqual(['PLA', 'PLA', 'PLA']);
+  });
+
   it('escapes swap messages', () => {
     expect(buildBambuCustomGcodeXml([{ ...swaps[0], message: '<a&b>' }])).toContain('extra="&lt;a&amp;b&gt;"');
   });
@@ -122,6 +141,15 @@ describe('Bambu parts project', () => {
     expect(s.printable_area).toEqual(settings.printable_area);
     expect((s.flush_volumes_matrix as string[]).length).toBe(25);
     expect((s.flush_volumes_vector as string[]).length).toBe(10);
+  });
+
+  it('sizes the flush matrix to exactly the filament count once filaments are added', () => {
+    // A 4×4 matrix for 3 filaments makes Bambu Studio fail slicing (-100).
+    const s = settingsWithFilaments(settings, ['#000000', '#ff0000', '#ffffff']);
+    expect(s.flush_volumes_matrix).toEqual(['0', '280', '280', '280', '0', '280', '280', '280', '0']);
+    expect((s.flush_volumes_vector as string[]).length).toBe(6);
+    // A single filament keeps the template's own matrix.
+    expect(settingsWithFilaments(settings, ['#000000']).flush_volumes_matrix).toBe(settings.flush_volumes_matrix);
   });
 
   it('writes one part per filament with its extruder', () => {

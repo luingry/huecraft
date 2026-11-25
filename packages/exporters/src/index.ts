@@ -5,7 +5,13 @@ import { strToU8, unzipSync, zipSync, type ZipOptions } from 'fflate';
 export interface SlicerSwap {
   /** Z (mm) of the top of the first layer printed with the new filament. */
   topZMm: number;
-  kind: 'pause' | 'color-change';
+  /**
+   * 'pause': stop and swap by hand. 'color-change': M600. 'ams': switch to
+   * filament `extruder` (multi-material unit, e.g. Bambu AMS), no stop.
+   */
+  kind: 'pause' | 'color-change' | 'ams';
+  /** 1-based filament slot for 'ams' swaps. */
+  extruder?: number;
   /** Colour of the filament loaded at this swap (#rrggbb). */
   colorHex: string;
   /** Short message (shown by slicers that support it, e.g. "Load Mid Gray PLA"). */
@@ -177,26 +183,36 @@ function fmtZ(z: number): string {
  */
 export function buildBambuCustomGcodeXml(swaps: SlicerSwap[]): string {
   const lines = ['<?xml version="1.0" encoding="utf-8"?>', '<custom_gcodes_per_layer>', '<plate>', '<plate_info id="1"/>'];
-  for (const s of swaps) {
-    const pause = s.kind === 'pause';
-    lines.push(
-      `<layer top_z="${fmtZ(s.topZMm)}" type="${pause ? CUSTOM_GCODE_TYPE.PausePrint : CUSTOM_GCODE_TYPE.ColorChange}" extruder="1" color="${escapeXml(s.colorHex)}" extra="${pause ? escapeXml(s.message) : ''}" gcode="${pause ? 'M400 U1' : 'M600'}"/>`,
-    );
-  }
-  lines.push('<mode value="SingleExtruder"/>', '</plate>', '</custom_gcodes_per_layer>', '');
+  for (const s of swaps) lines.push(`<layer top_z="${fmtZ(s.topZMm)}" ${customGcodeAttrs(s, 'M400 U1')}/>`);
+  lines.push(`<mode value="${customGcodeMode(swaps)}"/>`, '</plate>', '</custom_gcodes_per_layer>', '');
   return lines.join('\n');
+}
+
+/**
+ * type / extruder / color / extra / gcode attributes of one custom G-code item.
+ * An 'ams' swap is a ToolChange to its filament ("Change filament" on the layer
+ * slider): the slicer switches filament at that layer with its normal
+ * multi-material change, no stop. Needs a project with that many filaments.
+ */
+function customGcodeAttrs(s: SlicerSwap, pauseGcode: string): string {
+  const colour = escapeXml(s.colorHex);
+  if (s.kind === 'ams') {
+    return `type="${CUSTOM_GCODE_TYPE.ToolChange}" extruder="${s.extruder ?? 1}" color="${colour}" extra="" gcode="tool_change"`;
+  }
+  const pause = s.kind === 'pause';
+  return `type="${pause ? CUSTOM_GCODE_TYPE.PausePrint : CUSTOM_GCODE_TYPE.ColorChange}" extruder="1" color="${colour}" extra="${pause ? escapeXml(s.message) : ''}" gcode="${pause ? pauseGcode : 'M600'}"`;
+}
+
+/** Per-layer tool changes on a single-nozzle printer are the "MultiAsSingle" mode. */
+function customGcodeMode(swaps: SlicerSwap[]): string {
+  return swaps.some((s) => s.kind === 'ams') ? 'MultiAsSingle' : 'SingleExtruder';
 }
 
 /** PrusaSlicer custom G-code list (Format/3mf.cpp, `custom_gcodes_per_print_z`). */
 export function buildPrusaCustomGcodeXml(swaps: SlicerSwap[]): string {
   const lines = ['<?xml version="1.0" encoding="utf-8"?>', '<custom_gcodes_per_print_z>'];
-  for (const s of swaps) {
-    const pause = s.kind === 'pause';
-    lines.push(
-      `<code print_z="${fmtZ(s.topZMm)}" type="${pause ? CUSTOM_GCODE_TYPE.PausePrint : CUSTOM_GCODE_TYPE.ColorChange}" extruder="1" color="${escapeXml(s.colorHex)}" extra="${pause ? escapeXml(s.message) : ''}" gcode="${pause ? 'M601' : 'M600'}"/>`,
-    );
-  }
-  lines.push('<mode value="SingleExtruder"/>', '</custom_gcodes_per_print_z>', '');
+  for (const s of swaps) lines.push(`<code print_z="${fmtZ(s.topZMm)}" ${customGcodeAttrs(s, 'M601')}/>`);
+  lines.push(`<mode value="${customGcodeMode(swaps)}"/>`, '</custom_gcodes_per_print_z>', '');
   return lines.join('\n');
 }
 
@@ -272,6 +288,11 @@ export interface ThreeMfOptions {
   firstLayerHeightMm?: number;
   /** Colour of the first filament, written into the borrowed configuration. */
   firstFilamentHex?: string;
+  /**
+   * Colour per filament (index = extruder - 1) for 'ams' swaps: the borrowed
+   * configuration gets exactly these filaments (see settingsWithFilaments).
+   */
+  filamentColours?: string[];
   /** Model extent, used to centre it on the template's bed. */
   sizeMm?: { width: number; height: number };
   /** Deflate level 0..9. Default 1: ~3x faster than 6 on a 2M-triangle model, ~5 % larger. */
@@ -424,10 +445,11 @@ function writeMeshObject(
 }
 
 function patchedSettings(opts: ThreeMfOptions): string {
-  const s: Record<string, unknown> = { ...(opts.template as SlicerProjectTemplate).settings };
+  const base = (opts.template as SlicerProjectTemplate).settings;
+  const s: Record<string, unknown> = opts.filamentColours?.length ? settingsWithFilaments(base, opts.filamentColours) : { ...base };
   if (opts.layerHeightMm) s['layer_height'] = fmtZ(opts.layerHeightMm);
   if (opts.firstLayerHeightMm) s['initial_layer_print_height'] = fmtZ(opts.firstLayerHeightMm);
-  if (opts.firstFilamentHex && Array.isArray(s['filament_colour']) && s['filament_colour'].length > 0) {
+  if (opts.firstFilamentHex && !opts.filamentColours?.length && Array.isArray(s['filament_colour']) && s['filament_colour'].length > 0) {
     const colours = [...(s['filament_colour'] as unknown[])];
     colours[0] = opts.firstFilamentHex.toUpperCase();
     s['filament_colour'] = colours;
@@ -448,7 +470,7 @@ const FILAMENT_KEYS = new Set([
   'overhang_fan_speed', 'overhang_fan_threshold', 'override_process_overhang_speed', 'reduce_fan_stop_start_freq',
   'required_nozzle_HRC', 'slow_down_for_layer_cooling', 'slow_down_layer_time', 'slow_down_min_speed', 'supertack_plate_temp',
   'supertack_plate_temp_initial_layer', 'temperature_vitrification', 'textured_plate_temp', 'textured_plate_temp_initial_layer',
-  'volumetric_speed_coefficients',
+  'volumetric_speed_coefficients', 'long_retractions_when_ec', 'retraction_distances_when_ec', 'pre_start_fan_time',
 ]);
 
 /** Number of filaments a Bambu Studio / OrcaSlicer project configuration defines. */
@@ -471,7 +493,7 @@ export function settingsWithFilaments(settings: Record<string, unknown>, colours
   const N = Math.max(L, colours.length);
   if (N > L) {
     for (const [k, v] of Object.entries(settings)) {
-      if (!Array.isArray(v) || v.length !== L || !(k.startsWith('filament_') || FILAMENT_KEYS.has(k))) continue;
+      if (!Array.isArray(v) || v.length !== L ||!(k.startsWith('filament_') || FILAMENT_KEYS.has(k))) continue;
       const grown = [...v];
       while (grown.length < N) grown.push(v[L - 1]);
       s[k] = grown;
@@ -487,11 +509,13 @@ export function settingsWithFilaments(settings: Record<string, unknown>, colours
     }
   }
   // One square block per extruder, its side the filament slots the slicer flushes
-  // between (at least N; some templates keep 4 slots for a single filament).
+  // between. A single-filament template may keep 4 slots; once filaments are
+  // added the side must be exactly N (Bambu Studio fails slicing with -100 on a
+  // 4×4 matrix for 3 filaments).
   const extruders = Array.isArray(settings['nozzle_diameter']) ? (settings['nozzle_diameter'] as unknown[]).length : 1;
   const matrix = settings['flush_volumes_matrix'];
   const side = Array.isArray(matrix) ? Math.round(Math.sqrt(matrix.length / extruders)) : 0;
-  if (Array.isArray(matrix) && side > 0 && side * side * extruders === matrix.length && side < N) {
+  if (Array.isArray(matrix) && side > 0 && side * side * extruders === matrix.length && N > L && side !== N) {
     const high = String(Math.max(...matrix.map(Number)));
     const out: string[] = [];
     for (let e = 0; e < extruders; e++) {
@@ -502,7 +526,7 @@ export function settingsWithFilaments(settings: Record<string, unknown>, colours
     s['flush_volumes_matrix'] = out;
     const vector = settings['flush_volumes_vector'];
     if (Array.isArray(vector) && vector.length === 2 * side) {
-      const grown = [...vector];
+      const grown = vector.slice(0, 2 * N);
       while (grown.length < 2 * N) grown.push(vector[2 * side - 2], vector[2 * side - 1]);
       s['flush_volumes_vector'] = grown;
     }
