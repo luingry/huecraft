@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
-import { buildSolidHeightfieldMesh } from '@huecraft/mesh';
+import { buildSolidHeightfieldMesh, buildTextMesh } from '@huecraft/mesh';
 import {
   BAMBU_CUSTOM_GCODE_PATH,
   build3mfModel,
@@ -85,6 +85,46 @@ describe('export3mf', () => {
     expect(model).toContain('<metadata name="Application">BambuStudio-02.08.03.66</metadata>');
     expect(model).toContain('<metadata name="BambuStudio:3mfVersion">1</metadata>');
     expect(model).toContain('transform="1 0 0 0 1 0 0 0 1 108 108 0"');
+  });
+
+  it('writes a note as a modifier part only with a template', () => {
+    const settings: Record<string, unknown> = { filament_colour: ['#00AE42'], printable_area: ['0x0', '256x0', '256x256', '0x256'] };
+    for (let i = 0; i < 30; i++) settings[`k${i}`] = String(i);
+    const template = { application: 'BambuStudio-02.08.03.66', settings };
+    const note = { name: 'Nota & plano', mesh: buildTextMesh(['A1'], { pixelMm: 1, depthMm: 1, x: 0, y: -3 }) };
+    const files = unzipSync(export3mf(mesh, { name: 'Pic', swaps, template, note, sizeMm: { width: 40, height: 40 } }));
+    const model = strFromU8(files['3D/3dmodel.model']);
+    expect(model).toMatch(/<object id="3" type="model">\s*<components>\s*<component objectid="1"\/>\s*<component objectid="2"\/>/);
+    expect(model).toContain('<item objectid="3"');
+    // Note at the back-left corner of the 256 mm bed: item offset is 108, margin 1 mm.
+    const noteXml = model.slice(model.indexOf('<object id="2"'), model.indexOf('<object id="3"'));
+    const xs = [...noteXml.matchAll(/x="(-?[\d.]+)"/g)].map((m) => Number(m[1]));
+    const ys = [...noteXml.matchAll(/y="(-?[\d.]+)"/g)].map((m) => Number(m[1]));
+    expect(Math.min(...xs) + 108).toBeCloseTo(1, 3);
+    expect(Math.max(...ys) + 108).toBeCloseTo(255, 3);
+    const cfg = strFromU8(files['Metadata/model_settings.config']);
+    expect(cfg).toMatch(/<part id="1" subtype="normal_part">/);
+    expect(cfg).toMatch(/<part id="2" subtype="modifier_part">\s*<metadata key="name" value="Nota &amp; plano"\/>/);
+    // Without a template the note would load as a printed part: left out.
+    const plain = unzipSync(export3mf(mesh, { name: 'Pic', swaps, note }));
+    expect(plain['Metadata/model_settings.config']).toBeUndefined();
+    expect(strFromU8(plain['3D/3dmodel.model'])).not.toContain('Nota');
+    // Parts project: the note follows the filament parts.
+    const parts = unzipSync(
+      exportBambuPartsProject(mesh, {
+        name: 'FD',
+        template,
+        volumes: [{ name: '1 · Clear', extruder: 1, firstTriangle: 0, lastTriangle: mesh.triangleCount - 1 }],
+        filamentColours: ['#ffffff'],
+        layerHeightMm: 0.08,
+        firstLayerHeightMm: 0.16,
+        sizeMm: { width: 40, height: 40 },
+        note,
+      }),
+    );
+    expect(strFromU8(parts['Metadata/model_settings.config'])).toMatch(/<object id="3">[\s\S]*<part id="2" subtype="modifier_part">/);
+    expect(strFromU8(parts['3D/3dmodel.model']).match(/<component /g)).toHaveLength(2);
+    expect(strFromU8(parts['3D/Objects/object_1.model'])).toMatch(/<object id="2" type="model">/);
   });
 
   it('rejects files that are not slicer projects', () => {

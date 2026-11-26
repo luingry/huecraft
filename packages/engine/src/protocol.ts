@@ -97,6 +97,11 @@ export interface ExportRequestParams {
    * project files (PrusaSlicer reads them when opened as a project).
    */
   slicerTemplate?: Uint8Array;
+  /**
+   * With a slicer template: put the swap plan in front of the model as 3D text,
+   * written as a modifier (visible in the slicer, never printed). Default true.
+   */
+  slicerNote?: boolean;
 }
 
 export interface ExportResult {

@@ -258,6 +258,39 @@ export function readSlicerProjectTemplate(data: Uint8Array): SlicerProjectTempla
 }
 
 function bedCentre(settings: Record<string, unknown>): [number, number] | null {
+  const b = bedBounds(settings);
+  return b ? [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2] : null;
+}
+
+/** Margin between the note and the bed edge (mm). */
+const NOTE_BED_MARGIN_MM = 1;
+
+/**
+ * Note mesh moved so its top-left corner sits at the back-left corner of the
+ * template's bed (top-left in the slicer's top view). `offset` is the
+ * translation the build item applies to the object.
+ */
+function noteAtBedCorner(note: SlicerNote, settings: Record<string, unknown>, offset: [number, number]): MeshData {
+  const b = bedBounds(settings);
+  const p = note.mesh.positions;
+  if (!b || p.length === 0) return note.mesh;
+  let minX = Infinity, maxY = -Infinity;
+  for (let i = 0; i < p.length; i += 3) {
+    if (p[i] < minX) minX = p[i];
+    if (p[i + 1] > maxY) maxY = p[i + 1];
+  }
+  const dx = b.minX + NOTE_BED_MARGIN_MM - offset[0] - minX;
+  const dy = b.maxY - NOTE_BED_MARGIN_MM - offset[1] - maxY;
+  const out = new Float32Array(p.length);
+  for (let i = 0; i < p.length; i += 3) {
+    out[i] = p[i] + dx;
+    out[i + 1] = p[i + 1] + dy;
+    out[i + 2] = p[i + 2];
+  }
+  return { positions: out, indices: note.mesh.indices, triangleCount: note.mesh.triangleCount };
+}
+
+function bedBounds(settings: Record<string, unknown>): { minX: number; minY: number; maxX: number; maxY: number } | null {
   const area = settings['printable_area'];
   if (!Array.isArray(area) || area.length < 3) return null;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -269,7 +302,7 @@ function bedCentre(settings: Record<string, unknown>): [number, number] | null {
     minX = Math.min(minX, x); maxX = Math.max(maxX, x);
     minY = Math.min(minY, y); maxY = Math.max(maxY, y);
   }
-  return [(minX + maxX) / 2, (minY + maxY) / 2];
+  return { minX, minY, maxX, maxY };
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +339,18 @@ export interface ThreeMfOptions {
    * Slic3r_PE_model.config are not used, as Bambu Studio merges them into one part.
    */
   volumes?: MeshVolume[];
+  /**
+   * Visible note (e.g. the swap plan as 3D text) written as a modifier part of
+   * the object: shown in the slicer's 3D view and object list, never printed.
+   * Only used with a template, as part types need a full slicer project.
+   */
+  note?: SlicerNote;
+}
+
+/** Geometry shown in the slicer as a modifier (not printed); moved to the back-left corner of the template bed. */
+export interface SlicerNote {
+  name: string;
+  mesh: MeshData;
 }
 
 export interface MeshVolume {
@@ -358,8 +403,19 @@ export function build3mfModel(mesh: MeshData, opts: ThreeMfOptions = {}): Uint8A
   w.bytes(strToU8(` <metadata name="Title">${name}</metadata>\n`));
   w.ascii(' <resources>\n');
   const volumes = opts.volumes ?? [];
+  const note = tpl && volumes.length === 0 ? opts.note : undefined;
   let itemId = 1;
-  if (volumes.length === 0) {
+  if (note) {
+    // Model and note as two parts of one object; model_settings.config makes
+    // the note a modifier.
+    const c = opts.sizeMm ? bedCentre(tpl!.settings) : null;
+    const offset: [number, number] = c && opts.sizeMm ? [c[0] - opts.sizeMm.width / 2, c[1] - opts.sizeMm.height / 2] : [0, 0];
+    const noteMesh = noteAtBedCorner(note, tpl!.settings, offset);
+    writeMeshObject(w, 1, name, positions, indices, 0, triangleCount - 1, null);
+    writeMeshObject(w, 2, escapeXml(note.name), noteMesh.positions, noteMesh.indices, 0, noteMesh.triangleCount - 1, null);
+    itemId = 3;
+    w.ascii('  <object id="3" type="model">\n   <components>\n    <component objectid="1"/>\n    <component objectid="2"/>\n   </components>\n  </object>\n');
+  } else if (volumes.length === 0) {
     writeMeshObject(w, 1, name, positions, indices, 0, triangleCount - 1, null);
   } else {
     // One mesh object per part, assembled by a components object: slicers load
@@ -442,6 +498,43 @@ function writeMeshObject(
     w.ascii('"/>\n');
   }
   w.ascii('    </triangles>\n   </mesh>\n  </object>\n');
+}
+
+interface PartSetting {
+  id: number;
+  name: string;
+  extruder: number;
+  modifier?: boolean;
+}
+
+/** Metadata/model_settings.config for one object of normal parts and modifiers on plate 1. */
+function modelSettingsXml(objectId: number, escapedName: string, parts: PartSetting[]): string {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<config>',
+    `  <object id="${objectId}">`,
+    `    <metadata key="name" value="${escapedName}"/>`,
+    '    <metadata key="extruder" value="1"/>',
+    ...parts.flatMap((p) => [
+      `    <part id="${p.id}" subtype="${p.modifier ? 'modifier_part' : 'normal_part'}">`,
+      `      <metadata key="name" value="${escapeXml(p.name)}"/>`,
+      '      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>',
+      `      <metadata key="extruder" value="${p.extruder}"/>`,
+      '    </part>',
+    ]),
+    '  </object>',
+    '  <plate>',
+    '    <metadata key="plater_id" value="1"/>',
+    '    <metadata key="plater_name" value=""/>',
+    '    <metadata key="locked" value="false"/>',
+    '    <model_instance>',
+    `      <metadata key="object_id" value="${objectId}"/>`,
+    '      <metadata key="instance_id" value="0"/>',
+    '    </model_instance>',
+    '  </plate>',
+    '</config>',
+    '',
+  ].join('\n');
 }
 
 function patchedSettings(opts: ThreeMfOptions): string {
@@ -547,6 +640,8 @@ export interface BambuPartsOptions {
   firstLayerHeightMm: number;
   sizeMm: { width: number; height: number };
   attachments?: Record<string, string>;
+  /** Visible note written as a modifier part (see ThreeMfOptions.note). */
+  note?: SlicerNote;
 }
 
 /**
@@ -557,20 +652,26 @@ export interface BambuPartsOptions {
  * crashes on files that carry model settings.
  */
 export function exportBambuPartsProject(mesh: MeshData, opts: BambuPartsOptions): Uint8Array {
-  const { volumes, template } = opts;
+  const { volumes, template, note } = opts;
   const name = escapeXml(opts.name);
-  const assembly = volumes.length + 1;
+  const partCount = volumes.length + (note ? 1 : 0);
+  const assembly = partCount + 1;
   const vertexCount = mesh.positions.length / 3;
 
   const parts = new ByteWriter(vertexCount * 56 + mesh.triangleCount * 50 + 4096);
   parts.ascii('<?xml version="1.0" encoding="UTF-8"?>\n<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">\n <resources>\n');
   const remap = new Int32Array(vertexCount);
   volumes.forEach((v, i) => writeMeshObject(parts, i + 1, escapeXml(v.name), mesh.positions, mesh.indices, v.firstTriangle, v.lastTriangle, remap));
+  const c = bedCentre(template.settings) ?? [opts.sizeMm.width / 2, opts.sizeMm.height / 2];
+  const offset: [number, number] = [c[0] - opts.sizeMm.width / 2, c[1] - opts.sizeMm.height / 2];
+  if (note) {
+    const noteMesh = noteAtBedCorner(note, template.settings, offset);
+    writeMeshObject(parts, partCount, escapeXml(note.name), noteMesh.positions, noteMesh.indices, 0, noteMesh.triangleCount - 1, null);
+  }
   parts.ascii(' </resources>\n</model>\n');
 
-  const c = bedCentre(template.settings) ?? [opts.sizeMm.width / 2, opts.sizeMm.height / 2];
-  const tx = fmtZ(c[0] - opts.sizeMm.width / 2);
-  const ty = fmtZ(c[1] - opts.sizeMm.height / 2);
+  const tx = fmtZ(offset[0]);
+  const ty = fmtZ(offset[1]);
   const root = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06" requiredextensions="p">',
@@ -580,7 +681,7 @@ export function exportBambuPartsProject(mesh: MeshData, opts: BambuPartsOptions)
     ' <resources>',
     `  <object id="${assembly}" type="model">`,
     '   <components>',
-    ...volumes.map((_, i) => `    <component p:path="/3D/Objects/object_1.model" objectid="${i + 1}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>`),
+    ...Array.from({ length: partCount }, (_, i) => `    <component p:path="/3D/Objects/object_1.model" objectid="${i + 1}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>`),
     '   </components>',
     '  </object>',
     ' </resources>',
@@ -591,32 +692,10 @@ export function exportBambuPartsProject(mesh: MeshData, opts: BambuPartsOptions)
     '',
   ].join('\n');
 
-  const settings = [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    '<config>',
-    `  <object id="${assembly}">`,
-    `    <metadata key="name" value="${name}"/>`,
-    '    <metadata key="extruder" value="1"/>',
-    ...volumes.flatMap((v, i) => [
-      `    <part id="${i + 1}" subtype="normal_part">`,
-      `      <metadata key="name" value="${escapeXml(v.name)}"/>`,
-      '      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>',
-      `      <metadata key="extruder" value="${v.extruder}"/>`,
-      '    </part>',
-    ]),
-    '  </object>',
-    '  <plate>',
-    '    <metadata key="plater_id" value="1"/>',
-    '    <metadata key="plater_name" value=""/>',
-    '    <metadata key="locked" value="false"/>',
-    '    <model_instance>',
-    `      <metadata key="object_id" value="${assembly}"/>`,
-    '      <metadata key="instance_id" value="0"/>',
-    '    </model_instance>',
-    '  </plate>',
-    '</config>',
-    '',
-  ].join('\n');
+  const settings = modelSettingsXml(assembly, name, [
+    ...volumes.map((v, i) => ({ id: i + 1, name: v.name, extruder: v.extruder })),
+    ...(note ? [{ id: partCount, name: note.name, extruder: 1, modifier: true }] : []),
+  ]);
 
   const project = settingsWithFilaments(template.settings, opts.filamentColours);
   project['layer_height'] = fmtZ(opts.layerHeightMm);
@@ -656,6 +735,14 @@ export function export3mf(mesh: MeshData, opts: ThreeMfOptions = {}): Uint8Array
     files[PRUSA_CUSTOM_GCODE_PATH] = strToU8(buildPrusaCustomGcodeXml(swaps));
   }
   if (opts.template) files[PROJECT_SETTINGS_PATH] = strToU8(patchedSettings(opts));
+  if (opts.template && opts.note && !opts.volumes?.length) {
+    files['Metadata/model_settings.config'] = strToU8(
+      modelSettingsXml(3, escapeXml(opts.name ?? 'hueCraft'), [
+        { id: 1, name: opts.name ?? 'hueCraft', extruder: 1 },
+        { id: 2, name: opts.note.name, extruder: 1, modifier: true },
+      ]),
+    );
+  }
   for (const [path, text] of Object.entries(opts.attachments ?? {})) files[path] = strToU8(text);
   return zipSync(files, { level: opts.compressionLevel ?? 1 });
 }

@@ -26,6 +26,7 @@ import {
 } from '@huecraft/optics';
 import { buildSolidHeightfieldMesh, buildTerracedMesh, buildTerracedSolidMesh } from '@huecraft/mesh';
 import { export3mf, exportBambuPartsProject, exportBinaryStl, exportStlZip, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
+import { buildSlicerNote, faceDownNoteLines, swapNoteLines } from './slicerNote.js';
 import { adjustColorTarget, colorHeightField, isNeutralTone, lutToOklab } from './colorHeight.js';
 import { autoTune, buildTuneTarget, type AutoTuneParams, type AutoTuneResult, type TuneTarget } from './autotune.js';
 import { buildFaceDownModel, formatFaceDownPlan } from './faceDown.js';
@@ -398,7 +399,20 @@ export class EngineCore {
         colorHex: s.colorHex,
         message: `Load ${s.filamentName}`,
       }));
+      const note =
+        template && params.slicerNote !== false
+          ? buildSlicerNote(
+              swapNoteLines({
+                name: params.name,
+                mode: params.swapCommand,
+                firstFilament: `${(stack[0]?.filament ?? FALLBACK_FILAMENT).name}${ams ? ' [1]' : ''}`,
+                swaps: swaps.map((s, i) => ({ ...s, ...(ams ? { slot: slicerSwaps[i].extruder } : {}) })),
+              }),
+              size.width,
+            )
+          : undefined;
       bytes = export3mf(mesh, {
+        ...(note ? { note } : {}),
         name: params.name,
         swaps: slicerSwaps,
         attachments: { 'Metadata/hueCraft_swap_plan.txt': swapText },
@@ -486,6 +500,7 @@ export class EngineCore {
             firstLayerHeightMm: print.firstLayerHeightMm,
             sizeMm: size,
             attachments,
+            ...(params.slicerNote !== false ? { note: buildSlicerNote(faceDownNoteLines(params.name, fd.filaments), size.width) } : {}),
           })
         : export3mf(fd.mesh, { name: params.name, volumes: fd.volumes, attachments });
     }

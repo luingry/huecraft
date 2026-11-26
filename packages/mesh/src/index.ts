@@ -6,6 +6,7 @@
  */
 
 export { buildTerracedSolidMesh, type TerracedSolidInput } from './terrace.js';
+export { buildTextMesh, measureText, toFontText, type TextMeshOptions } from './text.js';
 
 export interface MeshData {
   positions: Float32Array;
