@@ -3,7 +3,7 @@
   "compilerOptions": {
     "jsx": "react-jsx",
     "noEmit": true,
-    "types": ["node"],
+    "types": ["node", "vite/client"],
     "paths": {
       "@/*": ["./src/*"],
       "@huecraft/*": ["../../packages/*/src"]

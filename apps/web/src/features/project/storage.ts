@@ -93,15 +93,69 @@ export async function deleteProject(id: string): Promise<void> {
 /* ---------- Slicer template ---------- */
 
 const TEMPLATE_KEY = 'slicer-template';
+/** Disk copy served by the dev server (vite.config.ts); absent on a static host. */
+const TEMPLATE_DISK_URL = '/__huecraft/slicer-template';
+const HAS_DISK_STORE = import.meta.env.DEV;
 
+async function loadTemplateFromDisk(): Promise<SlicerTemplate | null> {
+  if (!HAS_DISK_STORE) return null;
+  try {
+    const res = await fetch(TEMPLATE_DISK_URL);
+    const fileName = res.headers.get('X-File-Name');
+    if (res.status !== 200 || !fileName) return null;
+    return {
+      fileName: decodeURIComponent(fileName),
+      application: decodeURIComponent(res.headers.get('X-Application') ?? ''),
+      bytes: new Uint8Array(await res.arrayBuffer()),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function saveTemplateToDisk(t: SlicerTemplate | null): Promise<void> {
+  if (!HAS_DISK_STORE) return;
+  try {
+    if (!t) {
+      await fetch(TEMPLATE_DISK_URL, { method: 'DELETE' });
+      return;
+    }
+    const q = new URLSearchParams({ fileName: t.fileName, application: t.application });
+    await fetch(`${TEMPLATE_DISK_URL}?${q}`, { method: 'PUT', body: t.bytes as BlobPart });
+  } catch {
+    /* no local server: the IndexedDB copy is all there is */
+  }
+}
+
+/** Asks the browser not to evict our storage (the template lives there). */
+function requestPersistentStorage(): void {
+  navigator.storage?.persist?.().catch(() => undefined);
+}
+
+/**
+ * The template used by every project. Read from IndexedDB first, then from the
+ * disk copy (another origin, cleared storage), which is written back to IndexedDB.
+ */
 export async function loadSlicerTemplate(): Promise<SlicerTemplate | null> {
-  const row = await db.settings.get(TEMPLATE_KEY);
-  return (row?.value as SlicerTemplate | undefined) ?? null;
+  const row = await db.settings.get(TEMPLATE_KEY).catch(() => undefined);
+  const stored = (row?.value as SlicerTemplate | undefined) ?? null;
+  if (stored) {
+    requestPersistentStorage();
+    // Templates chosen before the disk copy existed: back them up once.
+    void loadTemplateFromDisk().then((disk) => (disk ? undefined : saveTemplateToDisk(stored)));
+    return stored;
+  }
+  const disk = await loadTemplateFromDisk();
+  if (disk) await db.settings.put({ key: TEMPLATE_KEY, value: disk }).catch(() => undefined);
+  return disk;
 }
 
 export async function saveSlicerTemplate(t: SlicerTemplate | null): Promise<void> {
-  if (t) await db.settings.put({ key: TEMPLATE_KEY, value: t });
-  else await db.settings.delete(TEMPLATE_KEY);
+  if (t) {
+    await db.settings.put({ key: TEMPLATE_KEY, value: t });
+    requestPersistentStorage();
+  } else await db.settings.delete(TEMPLATE_KEY);
+  await saveTemplateToDisk(t);
 }
 
 /* ---------- UI preferences (per browser, best effort) ---------- */

@@ -93,3 +93,9 @@
 - **Symptom:** in the 3D view (Impresso/Slicer) the side walls of a tall region (e.g. yellow over orange over black) are painted in the top colour all the way down to the black base; the slicer preview shows the black and orange layers underneath.
 - **Cause:** `buildTerracedMesh` (`packages/mesh/src/index.ts`) emitted each vertical wall as one quad coloured by the taller column's top layer, regardless of which layers the wall actually spans. Only the preview was wrong; the 3MF was fine.
 - **Fix:** walls are split into horizontal bands per layer (consecutive layers of identical colour in both LUTs merged), each in its own layer colour. The pass-1 quad count uses the same band rule and the builder throws if counted ≠ emitted.
+
+## Slicer template (base 3MF) "forgotten" between sessions
+
+- **Symptom:** the project template chosen in Filamentos is gone on a later run, so exports leave without the Bambu project config.
+- **Cause:** it lived only in the browser's IndexedDB, which is per origin. Vite moved to 5174 when 5173 was busy (another dev server), giving an empty database; storage was also not marked persistent, so the browser could evict it.
+- **Fix:** `strictPort: true` in `apps/web/vite.config.ts`, `navigator.storage.persist()` on save/load, and a disk copy in `~/.huecraft/slicer-template.3mf` (+ `.json` metadata) served by the dev server at `/__huecraft/slicer-template` (dev only: in production Vercel rewrites every path to index.html, so the client skips it); `loadSlicerTemplate` falls back to it and writes it back to IndexedDB.
