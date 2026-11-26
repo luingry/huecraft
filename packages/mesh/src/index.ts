@@ -38,22 +38,49 @@ export interface TerracedMeshInput {
  * count in a row is one flat quad at its layer top, vertical walls separate
  * neighbours with different counts and close the border down to z = 0, and one
  * quad closes the bottom. Vertices are not shared between quads so colours
- * stay crisp (flat shading). Walls take the colour of the taller column.
+ * stay crisp (flat shading). Walls are split into horizontal bands, one per
+ * layer (consecutive layers of the same colour merged), each in that layer's
+ * colour: a wall from count m up to n shows layers m+1..n as they are printed,
+ * not the top colour of the taller column all the way down.
  */
 export function buildTerracedMesh(input: TerracedMeshInput): TerracedMesh {
   const { field, width: w, height: h, zOfCount } = input;
   const px = input.widthMm / w;
   const py = input.heightMm / h;
+  const lutP = toFloatLut(input.printedLut);
+  const lutS = toFloatLut(input.slicerLut);
+  const counts = zOfCount.length;
+  // sameAsBelow[k]: layer k has the same colour as layer k-1 in both LUTs.
+  const sameAsBelow = new Uint8Array(counts);
+  for (let k = 2; k < counts; k++) {
+    let same = 1;
+    for (let ch = 0; ch < 3 && same; ch++) {
+      if (input.printedLut[k * 3 + ch] !== input.printedLut[(k - 1) * 3 + ch]) same = 0;
+      if (input.slicerLut[k * 3 + ch] !== input.slicerLut[(k - 1) * 3 + ch]) same = 0;
+    }
+    sameAsBelow[k] = same;
+  }
+  // newBands[n]: colour bands starting in layers 1..n (prefix sum).
+  const newBands = new Uint32Array(counts);
+  for (let k = 1; k < counts; k++) newBands[k] = newBands[k - 1] + (k === 1 || !sameAsBelow[k] ? 1 : 0);
+  /** Bands of a wall covering layers lo+1..hi. */
+  const bandCount = (lo: number, hi: number) => (hi <= lo ? 0 : newBands[hi] - newBands[lo + 1] + 1);
 
   // Pass 1: count quads.
   let quads = 1; // bottom
   for (let y = 0; y < h; y++) {
     const row = y * w;
     // Top runs and vertical x-walls at run boundaries.
-    let runs = 1;
-    for (let x = 1; x < w; x++) if (field[row + x] !== field[row + x - 1]) runs++;
-    quads += runs * 2 - 1; // runs + (runs - 1) x-walls
-    quads += 2; // left and right border walls
+    let prev = field[row];
+    quads++;
+    for (let x = 1; x < w; x++) {
+      const a = field[row + x];
+      if (a === prev) continue;
+      quads++;
+      quads += bandCount(Math.min(a, prev), Math.max(a, prev));
+      prev = a;
+    }
+    quads += bandCount(0, field[row]) + bandCount(0, field[row + w - 1]); // left and right border walls
     // y-walls between this row and the next (merged along x by equal pair).
     if (y + 1 < h) {
       const next = row + w;
@@ -66,24 +93,19 @@ export function buildTerracedMesh(input: TerracedMeshInput): TerracedMesh {
           prevA = -1;
           continue;
         }
-        if (a !== prevA || b !== prevB) quads++;
+        if (a !== prevA || b !== prevB) quads += bandCount(Math.min(a, b), Math.max(a, b));
         prevA = a;
         prevB = b;
       }
     }
   }
   // Top and bottom border walls (merged by equal count).
-  for (const row of [0, (h - 1) * w]) {
-    quads++;
-    for (let x = 1; x < w; x++) if (field[row + x] !== field[row + x - 1]) quads++;
-  }
+  for (const row of [0, (h - 1) * w]) borderRuns(field, row, w, (_x0, _x1, n) => (quads += bandCount(0, n)));
 
   const positions = new Float32Array(quads * 12);
   const printedColors = new Float32Array(quads * 12);
   const slicerColors = new Float32Array(quads * 12);
   const indices = new Uint32Array(quads * 6);
-  const lutP = toFloatLut(input.printedLut);
-  const lutS = toFloatLut(input.slicerLut);
 
   let q = 0;
   // Emit a quad given 4 corners in CCW order as seen from outside.
@@ -111,6 +133,20 @@ export function buildTerracedMesh(input: TerracedMeshInput): TerracedMesh {
     q++;
   };
 
+  /**
+   * A vertical wall over layers lo+1..hi, cut into colour bands. `band` emits
+   * one quad between za (bottom) and zb (top) in the colour of layer k.
+   */
+  const wall = (lo: number, hi: number, band: (za: number, zb: number, k: number) => void) => {
+    let k = lo + 1;
+    while (k <= hi) {
+      let e = k;
+      while (e + 1 <= hi && sameAsBelow[e + 1]) e++;
+      band(zOfCount[k - 1], zOfCount[e], e);
+      k = e + 1;
+    }
+  };
+
   for (let y = 0; y < h; y++) {
     const row = y * w;
     const yTop = (h - y) * py;
@@ -125,22 +161,17 @@ export function buildTerracedMesh(input: TerracedMeshInput): TerracedMesh {
       // Plateau (normal +z): CCW from above.
       quad(x0, yBot, z, x1, yBot, z, x1, yTop, z, x0, yTop, z, n);
       if (x < w) {
-        // x-wall between this run and the next one, owned by the taller column.
+        // x-wall between this run and the next one.
         const m = field[row + x];
-        const zm = zOfCount[m];
-        if (n > m) quad(x1, yBot, zm, x1, yTop, zm, x1, yTop, z, x1, yBot, z, n); // faces +x
-        else quad(x1, yTop, z, x1, yBot, z, x1, yBot, zm, x1, yTop, zm, m); // faces -x
+        if (n > m) wall(m, n, (za, zb, k) => quad(x1, yBot, za, x1, yTop, za, x1, yTop, zb, x1, yBot, zb, k)); // faces +x
+        else wall(n, m, (za, zb, k) => quad(x1, yTop, zb, x1, yBot, zb, x1, yBot, za, x1, yTop, za, k)); // faces -x
       }
       runStart = x;
     }
     // Left (-x) and right (+x) border walls.
-    const nl = field[row];
-    const zl = zOfCount[nl];
-    quad(0, yTop, 0, 0, yBot, 0, 0, yBot, zl, 0, yTop, zl, nl);
-    const nr = field[row + w - 1];
-    const zr = zOfCount[nr];
+    wall(0, field[row], (za, zb, k) => quad(0, yTop, za, 0, yBot, za, 0, yBot, zb, 0, yTop, zb, k));
     const xr = w * px;
-    quad(xr, yBot, 0, xr, yTop, 0, xr, yTop, zr, xr, yBot, zr, nr);
+    wall(0, field[row + w - 1], (za, zb, k) => quad(xr, yBot, za, xr, yTop, za, xr, yTop, zb, xr, yBot, zb, k));
     // y-walls between row y and y+1 at y = yBot.
     if (y + 1 < h) {
       const next = row + w;
@@ -154,30 +185,27 @@ export function buildTerracedMesh(input: TerracedMeshInput): TerracedMesh {
         }
         let e = x + 1;
         while (e < w && field[row + e] === a && field[next + e] === b) e++;
-        const za = zOfCount[a];
-        const zb = zOfCount[b];
         const x0 = x * px;
         const x1 = e * px;
-        if (a > b) quad(x0, yBot, zb, x1, yBot, zb, x1, yBot, za, x0, yBot, za, a); // upper row taller: faces -y
-        else quad(x1, yBot, za, x0, yBot, za, x0, yBot, zb, x1, yBot, zb, b); // lower row taller: faces +y
+        if (a > b) wall(b, a, (za, zb, k) => quad(x0, yBot, za, x1, yBot, za, x1, yBot, zb, x0, yBot, zb, k)); // upper row taller: faces -y
+        else wall(a, b, (za, zb, k) => quad(x1, yBot, za, x0, yBot, za, x0, yBot, zb, x1, yBot, zb, k)); // lower row taller: faces +y
         x = e;
       }
     }
   }
   // Top border (y = height, faces +y) and bottom border (y = 0, faces -y).
   const yMax = h * py;
-  borderRuns(field, 0, w, (x0, x1, n) => {
-    const z = zOfCount[n];
-    quad(x1 * px, yMax, 0, x0 * px, yMax, 0, x0 * px, yMax, z, x1 * px, yMax, z, n);
-  });
-  borderRuns(field, (h - 1) * w, w, (x0, x1, n) => {
-    const z = zOfCount[n];
-    quad(x0 * px, 0, 0, x1 * px, 0, 0, x1 * px, 0, z, x0 * px, 0, z, n);
-  });
+  borderRuns(field, 0, w, (x0, x1, n) =>
+    wall(0, n, (za, zb, k) => quad(x1 * px, yMax, za, x0 * px, yMax, za, x0 * px, yMax, zb, x1 * px, yMax, zb, k)),
+  );
+  borderRuns(field, (h - 1) * w, w, (x0, x1, n) =>
+    wall(0, n, (za, zb, k) => quad(x0 * px, 0, za, x1 * px, 0, za, x1 * px, 0, zb, x0 * px, 0, zb, k)),
+  );
   // Bottom (faces -z), coloured like the base.
   const nb = input.printedLut.length >= 6 ? 1 : 0; // n = 1: colour of the first layer
   quad(0, 0, 0, 0, yMax, 0, w * px, yMax, 0, w * px, 0, 0, nb);
 
+  if (q !== quads) throw new Error(`buildTerracedMesh: counted ${quads} quads, emitted ${q}`);
   return { positions, indices, printedColors, slicerColors, triangleCount: q * 2 };
 }
 

@@ -121,8 +121,37 @@ describe('buildTerracedMesh', () => {
   it('a uniform field is one plateau, four border walls and a bottom', () => {
     const field = new Uint16Array(16).fill(2);
     const mesh = buildTerracedMesh({ field, width: 4, height: 4, widthMm: 4, heightMm: 4, zOfCount: z, printedLut: lut, slicerLut: lut });
-    // 4 plateau runs (one per row) + 8 left/right walls + 2 top/bottom walls + 1 bottom.
-    expect(mesh.triangleCount).toBe((4 + 8 + 2 + 1) * 2);
+    // 4 plateau runs (one per row) + 8 left/right walls + 2 top/bottom walls + 1 bottom,
+    // each wall cut into 2 bands (layers 1 and 2 differ in colour).
+    expect(mesh.triangleCount).toBe((4 + 16 + 4 + 1) * 2);
     expect(mesh.printedColors[0]).toBeCloseTo(40 / 255);
+  });
+
+  it('walls show each layer in its own colour, not the top colour down to the bed', () => {
+    const field = new Uint16Array([3, 1]);
+    const mesh = buildTerracedMesh({ field, width: 2, height: 1, widthMm: 2, heightMm: 1, zOfCount: z, printedLut: lut, slicerLut: lut });
+    // Every quad sits within one layer band and carries that layer's colour.
+    for (let o = 0; o < mesh.positions.length; o += 12) {
+      let zMax = 0;
+      for (let v = o + 2; v < o + 12; v += 3) zMax = Math.max(zMax, mesh.positions[v]);
+      if (zMax === 0) continue;
+      const k = [...z].findIndex((zz) => Math.abs(zz - zMax) < 1e-6);
+      expect(Math.round(mesh.slicerColors[o] * 255)).toBe(lut[k * 3]);
+    }
+    // The wall between counts 3 and 1 spans layers 2 and 3 as two bands.
+    const wallBands = new Set<string>();
+    for (let o = 0; o < mesh.positions.length; o += 12) {
+      const xs = [0, 3, 6, 9].map((v) => mesh.positions[o + v]);
+      if (xs.every((x) => x === 1)) wallBands.add(`${mesh.positions[o + 2]}-${mesh.positions[o + 8]}`);
+    }
+    expect(wallBands.size).toBe(2);
+  });
+
+  it('merges consecutive layers of the same colour into one wall band', () => {
+    const flat = new Uint8Array([0, 0, 0, 10, 20, 30, 10, 20, 30, 10, 20, 30]);
+    const field = new Uint16Array([3]);
+    const mesh = buildTerracedMesh({ field, width: 1, height: 1, widthMm: 1, heightMm: 1, zOfCount: z, printedLut: flat, slicerLut: flat });
+    // plateau + 4 single-band border walls + bottom
+    expect(mesh.triangleCount).toBe(6 * 2);
   });
 });
