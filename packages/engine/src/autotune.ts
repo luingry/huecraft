@@ -29,6 +29,8 @@ export interface AutoTuneOptions {
   colorMatch?: number;
   /** Stop searching after this many milliseconds (best so far is kept). */
   timeBudgetMs?: number;
+  /** Weight of colour borders in colour mode (see ColorScorer.edgeError). Missing = EDGE_WEIGHT. */
+  edgeWeight?: number;
 }
 
 export interface AutoTuneParams {
@@ -169,10 +171,65 @@ function printedLab(fils: Fil[], order: number[], starts: number[], total: numbe
   }
 }
 
+/** Weight of the border term (ColorScorer.edgeError) against the mean per-pixel cost. */
+export const EDGE_WEIGHT = 0.5;
+/** Neighbours further apart than this (ΔE_ok) count as a border between colours. */
+const EDGE_MIN_DE = 0.12;
 /**
- * Colour-driven heights: every pixel takes its best layer count, so the error
- * of a stack is Σ_pixels min_n cost(n). Pixels are binned by (OKLab cell, luma
- * layer count) to keep each evaluation small.
+ * Only borders between two near-neutral colours (black / grey / white) are
+ * scored. Those are the ones a stack ruins by putting a hue between them
+ * (orange specks on a black figure over a white page). A border between a
+ * neutral and a hue (black bird on an orange sun) crosses some other filament
+ * in any order where the hue sits on top, so scoring it only fights the colour
+ * fidelity of the hue.
+ */
+const EDGE_NEUTRAL_CHROMA = 0.05;
+
+/** Neighbouring pixel pairs across a border between two neutral colours, merged per bin pair. */
+function collectEdges(binOf: Int32Array, width: number, height: number, orig: Float64Array) {
+  const map = new Map<number, number>();
+  const a: number[] = [];
+  const b: number[] = [];
+  const w: number[] = [];
+  const min2 = EDGE_MIN_DE * EDGE_MIN_DE;
+  const c2 = EDGE_NEUTRAL_CHROMA * EDGE_NEUTRAL_CHROMA;
+  const neutral = (k: number) => orig[k * 3 + 1] * orig[k * 3 + 1] + orig[k * 3 + 2] * orig[k * 3 + 2] < c2;
+  const add = (p: number, q: number) => {
+    if (p < 0 || q < 0 || p === q || !neutral(p) || !neutral(q)) return;
+    const dl = orig[p * 3] - orig[q * 3];
+    const da = orig[p * 3 + 1] - orig[q * 3 + 1];
+    const db = orig[p * 3 + 2] - orig[q * 3 + 2];
+    if (dl * dl + da * da + db * db < min2) return;
+    const lo = p < q ? p : q;
+    const hi = p < q ? q : p;
+    const key = lo * 4294967296 + hi;
+    let e = map.get(key);
+    if (e === undefined) {
+      e = w.length;
+      map.set(key, e);
+      a.push(lo);
+      b.push(hi);
+      w.push(0);
+    }
+    w[e]++;
+  };
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      if (x + 1 < width) add(binOf[i], binOf[i + 1]);
+      if (y + 1 < height) add(binOf[i], binOf[i + width]);
+    }
+  let wSum = 0;
+  for (const v of w) wSum += v;
+  return { a: Uint32Array.from(a), b: Uint32Array.from(b), w: Float64Array.from(w), count: w.length, wSum };
+}
+
+/**
+ * Colour-driven heights: every pixel takes its best layer count (argmin of
+ * match + luma pull, as colorHeightField does), and a stack is scored by the
+ * colour error of those picks against the source plus the border term
+ * (edgeError). Pixels are binned by (OKLab cell, luma layer count) to keep
+ * each evaluation small.
  */
 class ColorScorer implements Scorer {
   evaluations = 0;
@@ -182,6 +239,9 @@ class ColorScorer implements Scorer {
   private wSum = 0;
   private pull: number;
   private lastColor = 0;
+  /** Borders between distinct colours: bin pair, weight, and the colour their mixture should print. */
+  private edges: { a: Uint32Array; b: Uint32Array; w: Float64Array; count: number; wSum: number };
+  private bestN: Uint16Array;
   constructor(
     readonly fils: Fil[],
     readonly model: LayerModel,
@@ -191,6 +251,7 @@ class ColorScorer implements Scorer {
     readonly hist: Uint32Array,
     /** Tone-adjusted target the heights follow (defaults to `target`). */
     aim: TuneTarget = target,
+    readonly edgeWeight = EDGE_WEIGHT,
   ) {
     this.labs = new Float64Array((model.totalLayers + 1) * 3);
     this.pull = ((1 - strength) * LUMA_PULL) / Math.max(1, model.totalLayers) ** 2;
@@ -200,6 +261,7 @@ class ColorScorer implements Scorer {
     const lab: number[] = [];
     const orig: number[] = [];
     const nl: number[] = [];
+    const binOf = new Int32Array(lumaCounts.length).fill(-1);
     for (let i = 0; i < lumaCounts.length; i++) {
       const wi = target.weight[i];
       if (wi < 0.5) continue;
@@ -216,6 +278,7 @@ class ColorScorer implements Scorer {
         orig.push(0, 0, 0);
         nl.push(lumaCounts[i]);
       }
+      binOf[i] = k;
       w[k] += wi;
       lab[k * 3] += wi * L;
       lab[k * 3 + 1] += wi * A;
@@ -229,6 +292,8 @@ class ColorScorer implements Scorer {
         orig[k * 3 + c] /= w[k] || 1;
       }
     this.bins = { w: Float64Array.from(w), lab: Float64Array.from(lab), orig: Float64Array.from(orig), nl: Uint16Array.from(nl), count: w.length };
+    this.bestN = new Uint16Array(w.length);
+    this.edges = collectEdges(binOf, target.width, target.height, this.bins.orig);
   }
 
   score(order: number[], starts: number[]): number {
@@ -240,7 +305,6 @@ class ColorScorer implements Scorer {
     const s = this.strength;
     const pull = this.pull;
     const { w, lab, orig, nl, count } = this.bins;
-    let total = 0;
     let color = 0;
     for (let k = 0; k < count; k++) {
       const L = lab[k * 3];
@@ -261,14 +325,65 @@ class ColorScorer implements Scorer {
           bestN = n;
         }
       }
-      total += w[k] * best;
+      this.bestN[k] = bestN;
       const ol = labs[bestN * 3] - orig[k * 3];
       const oa = labs[bestN * 3 + 1] - orig[k * 3 + 1];
       const ob = labs[bestN * 3 + 2] - orig[k * 3 + 2];
       color += w[k] * (ol * ol + oa * oa + ob * ob);
     }
     this.lastColor = color / this.wSum;
-    return total / this.wSum;
+    // The match + luma-pull cost only picks each bin's height. The stack is
+    // judged by how close the print gets to the source: scoring the pull too
+    // made the search trade colour for heights near the luma relief (a sun's
+    // yellow squeezed to one layer when the stack puts the sun on top).
+    return this.lastColor + (this.edgeWeight > 0 ? this.edgeWeight * this.edgeError(labs) : 0);
+  }
+
+  /**
+   * Mean squared ΔE_ok between what a border between two colours prints and
+   * what it should look like. A line-width block (or a slicer line) straddling
+   * the border ends at a height between the two sides, so it prints the colour
+   * of the layers in between: with black and white at opposite ends of the
+   * stack every such block shows the filaments stacked between them (orange
+   * specks on a black-and-white figure). A layer in between looks right when
+   * it is a mix of the two sides, i.e. close to the OKLab segment joining
+   * them (greys between black and white). Per-pixel error alone barely sees
+   * this (borders are a small share of the area), so it never preferred
+   * stacks where colours that touch also sit next to each other in height.
+   */
+  private edgeError(labs: Float64Array): number {
+    const { a, b, w, count, wSum } = this.edges;
+    if (wSum <= 0) return 0;
+    const bestN = this.bestN;
+    const orig = this.bins.orig;
+    let err = 0;
+    for (let e = 0; e < count; e++) {
+      const na = bestN[a[e]];
+      const nb = bestN[b[e]];
+      if (nb - na <= 1 && na - nb <= 1) continue;
+      const lo = na < nb ? na : nb;
+      const hi = na < nb ? nb : na;
+      const pa = a[e] * 3;
+      const pb = b[e] * 3;
+      const ux = orig[pb] - orig[pa];
+      const uy = orig[pb + 1] - orig[pa + 1];
+      const uz = orig[pb + 2] - orig[pa + 2];
+      const uu = ux * ux + uy * uy + uz * uz || 1;
+      let sum = 0;
+      for (let n = lo + 1; n < hi; n++) {
+        const vx = labs[n * 3] - orig[pa];
+        const vy = labs[n * 3 + 1] - orig[pa + 1];
+        const vz = labs[n * 3 + 2] - orig[pa + 2];
+        let t = (vx * ux + vy * uy + vz * uz) / uu;
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const dx = vx - t * ux;
+        const dy = vy - t * uy;
+        const dz = vz - t * uz;
+        sum += dx * dx + dy * dy + dz * dz;
+      }
+      err += (w[e] * sum) / (hi - lo - 1);
+    }
+    return err / wSum;
   }
 
   colorMse(order: number[], starts: number[]): number {
@@ -565,7 +680,7 @@ export function autoTune(params: AutoTuneParams, ctx: AutoTuneContext): AutoTune
     const counts = ctx.fieldFor(relief);
     const stats = layerStats(counts, target, model.totalLayers);
     const cm = relief.colorMatch ?? 0;
-    return cm > 0 ? new ColorScorer(fils, model, target, counts, Math.min(1, cm), stats.hist, adjustColorTarget(target, relief)) : new StackScorer(fils, stats);
+    return cm > 0 ? new ColorScorer(fils, model, target, counts, Math.min(1, cm), stats.hist, adjustColorTarget(target, relief), params.options.edgeWeight) : new StackScorer(fils, stats);
   };
 
   // Before: the settings exactly as given.
@@ -586,7 +701,8 @@ export function autoTune(params: AutoTuneParams, ctx: AutoTuneContext): AutoTune
     const sc1 = scorerFor(neutral);
     const alt = searchStack(sc1, model, n, best, params.options.reorder, Math.max(deadline, performance.now() + 1500));
     evaluations += sc1.evaluations;
-    if (sc1.colorMse(alt.order, alt.starts) < sc0.colorMse(best.order, best.starts)) {
+    // Ties go to the neutral tone: nothing is gained by keeping the leftover.
+    if (sc1.colorMse(alt.order, alt.starts) <= sc0.colorMse(best.order, best.starts) + 1e-9) {
       relief = neutral;
       sc0 = sc1;
       best = alt;

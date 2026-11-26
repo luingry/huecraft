@@ -355,8 +355,13 @@ export function useWorkbench() {
    * squeeze every swap under such an area: one white layer over orange and
    * black prints beige. Quantiles stay the fallback. Skipped when the project
    * changed meanwhile. `merge` folds it into the previous undo step.
+   * `reorder` (import / preset step, colour-driven heights only) also lets it
+   * pick the filament order: with borders between black, grey and white scored,
+   * it keeps those filaments next to each other in the stack, so a black figure
+   * on a white page does not print the other colours along its edges. In luma
+   * mode the order search has no such term, so the reading's order is kept.
    */
-  const distributeSwaps = (merge: boolean) => {
+  const distributeSwaps = (merge: boolean, reorder = false) => {
     if (!result) return;
     const quantiles = (s: StackEntry[]) => autoDistributeStack(s, result.layerHistogram, result.baseLayers, result.totalLayers);
     const { id, stack, relief, print } = project;
@@ -367,9 +372,10 @@ export function useWorkbench() {
       apply(quantiles);
       return;
     }
+    const order = reorder && (relief.colorMatch ?? 0) > 0;
     client
-      .autoTune({ relief, print, stack, simulateLineWidth, options: { reorder: false, tone: false, timeBudgetMs: 1500 } })
-      // Same filaments in the same order (reorder off), only the starts move.
+      .autoTune({ relief, print, stack, simulateLineWidth, options: { reorder: order, tone: false, timeBudgetMs: 1500 } })
+      // Same filaments (in the same order unless `order`); the result's slots keep their ids.
       .then((res) => apply(() => res.stack))
       .catch(() => apply(quantiles));
   };
@@ -381,7 +387,7 @@ export function useWorkbench() {
   useEffect(() => {
     if (!result || !autoDistributePending.current) return;
     autoDistributePending.current = false;
-    distributeSwapsRef.current(true);
+    distributeSwapsRef.current(true, true);
   }, [result]);
 
   /* ---------- autosave ---------- */
@@ -604,10 +610,12 @@ export function useWorkbench() {
   // The current reading is whichever preset the project still matches, so undo
   // and manual edits keep the picker honest.
   const colorPresetId = useMemo<ColorPresetId | null>(() => {
-    const colors = sortStack(project.stack).map((e) => e.filament.colorHex.toLowerCase()).join();
+    // Order-insensitive: the import step may reorder the reading's filaments.
+    const key = (hexes: string[]) => hexes.map((h) => h.toLowerCase()).sort().join();
+    const colors = key(project.stack.map((e) => e.filament.colorHex));
     const r = colorPresets?.find(
       ({ preset, picks }) =>
-        picks.map((p) => p.filament.colorHex.toLowerCase()).join() === colors &&
+        key(picks.map((p) => p.filament.colorHex)) === colors &&
         preset.relief.smoothing === project.relief.smoothing &&
         preset.relief.posterize === project.relief.posterize,
     );

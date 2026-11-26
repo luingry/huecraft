@@ -146,7 +146,7 @@ describe('colour-driven heights', () => {
     expect(color.errorAfter).toBeLessThan(luma.errorAfter);
   });
 
-  it('colour auto-tune drops a leftover contrast that pulls the print to black and white', () => {
+  it('colour auto-tune keeps a leftover contrast only when it prints closer to the source', () => {
     const w = 40, h = 20;
     const rgba = new Uint8ClampedArray(w * h * 4);
     for (let i = 0; i < w * h; i++) rgba.set(i % w < w / 2 ? [200, 20, 30, 255] : [20, 60, 175, 255], i * 4);
@@ -156,9 +156,34 @@ describe('colour-driven heights', () => {
     const p = { print, stack: st, simulateLineWidth: false, options: { reorder: true, tone: false, colorMatch: 0.95 } };
     const clean = core.autoTune({ ...p, relief: DEFAULT_RELIEF });
     const harsh = core.autoTune({ ...p, relief: { ...DEFAULT_RELIEF, contrast: 3, gamma: 0.5 } });
-    expect(harsh.relief.contrast).toBe(1);
-    expect(harsh.relief.gamma).toBe(1);
+    // Never worse than starting from the neutral tone; a kept tone must have earned it.
     expect(harsh.errorAfter).toBeLessThanOrEqual(clean.errorAfter + 1e-6);
+    if (harsh.relief.contrast !== 1 || harsh.relief.gamma !== 1) expect(harsh.errorAfter).toBeLessThan(clean.errorAfter);
+  });
+
+  it('keeps black and white next to each other when a black figure with white streaks borders a white page', () => {
+    // White page, an orange disc, and a black figure (half over the disc,
+    // half over the page) with thin white streaks: the samurai-at-sunset case.
+    const w = 96, h = 96;
+    const rgba = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        let c = [255, 255, 255];
+        if ((x - 48) ** 2 + (y - 40) ** 2 < 30 ** 2) c = y < 40 ? [240, 70, 20] : [250, 160, 10];
+        if (x >= 36 && x < 60 && y >= 30 && y < 92) c = x % 5 === 0 ? [235, 235, 235] : [15, 15, 15];
+        rgba.set([...c, 255], (y * w + x) * 4);
+      }
+    const st = [entry('w', 0, '#ffffff', 0.7), entry('y', 7, '#fba004', 0.6), entry('o', 15, '#ff6a13', 0.6), entry('k', 22, '#1a1a1a', 0.1)];
+    const core = new EngineCore();
+    core.setImage({ width: w, height: h, rgba });
+    const p = { relief: { ...DEFAULT_RELIEF, colorMatch: 0.95 }, print: { ...print, maxHeightMm: 2.16 }, stack: st, simulateLineWidth: false };
+    const order = (r: { stack: StackEntry[] }) => r.stack.map((e) => e.slotId).join('');
+    const tuned = core.autoTune({ ...p, options: { reorder: true, tone: false } });
+    const o = order(tuned);
+    expect(Math.abs(o.indexOf('k') - o.indexOf('w'))).toBe(1);
+    // Without the border term the per-pixel error alone puts a hue between them.
+    const blind = order(core.autoTune({ ...p, options: { reorder: true, tone: false, edgeWeight: 0 } }));
+    expect(Math.abs(blind.indexOf('k') - blind.indexOf('w'))).toBeGreaterThan(1);
   });
 
   it('brightness and gamma still move the heights in colour mode', () => {
