@@ -49,6 +49,8 @@ export interface PreviewResult {
   slicerRgba: Uint8ClampedArray;
   /** Layer count per pixel (number of layers printed at that column). */
   layerField: Uint16Array;
+  /** Selected pixels (1) left by select strokes; null = no selection (everything editable). */
+  selection: Uint8Array | null;
   /** Pixels per layer count, index = layer count. Used for the stack histogram. */
   layerHistogram: Uint32Array;
   /** Colour per layer count for printed / slicer modes, RGB 0..255, index = layer count. */

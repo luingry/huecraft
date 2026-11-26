@@ -5,6 +5,7 @@ const core = new EngineCore();
 
 function previewTransfer(r: PreviewResult): Transferable[] {
   return [
+    ...(r.selection ? [r.selection.buffer] : []),
     r.printedRgba.buffer,
     r.slicerRgba.buffer,
     r.layerField.buffer,

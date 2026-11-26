@@ -56,8 +56,22 @@ function presetStack(r: ColorPresetResult): StackEntry[] {
   return r.picks.map((p, i) => createSlot(p.filament, i * 8));
 }
 
-/** What the brush does: paint a filament, or lighten / darken the colours under it. */
-export type BrushTool = 'paint' | 'brighten' | 'darken';
+/**
+ * What the left button does on the 3D view: drag to paint a filament or to
+ * lighten / darken the colours under the brush; click to fill a colour area
+ * with a filament (paint bucket) or to select a colour area / a colour.
+ */
+export type BrushTool = 'paint' | 'brighten' | 'darken' | 'fill' | 'selectArea' | 'selectColor';
+
+/** Tools that act on a click instead of a drag. */
+export type ClickTool = 'fill' | 'selectArea' | 'selectColor';
+
+export function isClickTool(tool: BrushTool): tool is ClickTool {
+  return tool === 'fill' || tool === 'selectArea' || tool === 'selectColor';
+}
+
+/** How a selection click combines with the current selection (Shift adds, Ctrl subtracts). */
+export type SelectMode = 'replace' | 'add' | 'subtract';
 
 export interface BrushSettings {
   tool: BrushTool;
@@ -75,6 +89,14 @@ export interface BrushSettings {
   tolerances: Record<ColorBlend, number>;
   /** Filament painted; null = the top filament. */
   slotId: string | null;
+  /** Paint bucket: colour distance from the clicked colour still filled, 0..1. */
+  fillTolerance: number;
+  /** Paint bucket: only the area connected to the click. */
+  fillContiguous: boolean;
+  /** Selection tools: colour distance from the clicked colour still selected, 0..1. */
+  selectTolerance: number;
+  /** Default combine mode of a selection click (modifier keys override it). */
+  selectMode: SelectMode;
 }
 
 /** Blends that compare colours and take a tolerance. */
@@ -94,6 +116,10 @@ const DEFAULT_BRUSH: BrushSettings = {
   blend: 'normal',
   tolerances: { sampled: 0.15, onLight: 0, onDark: 0 },
   slotId: null,
+  fillTolerance: 0.1,
+  fillContiguous: true,
+  selectTolerance: 0.1,
+  selectMode: 'replace',
 };
 
 function readBrush(): BrushSettings {
@@ -322,20 +348,41 @@ export function useWorkbench() {
   const engine = useEngine(image?.source ?? null, previewParams);
   const result = engine.result;
 
-  // After a new image, spread the swaps over the image's tones once.
+  /**
+   * Places the swaps with a swaps-only auto-tune, which judges the predicted
+   * print colours, so a large flat area (a white background at full height)
+   * gets a filament band thick enough to show its colour. Pixel quantiles alone
+   * squeeze every swap under such an area: one white layer over orange and
+   * black prints beige. Quantiles stay the fallback. Skipped when the project
+   * changed meanwhile. `merge` folds it into the previous undo step.
+   */
+  const distributeSwaps = (merge: boolean) => {
+    if (!result) return;
+    const quantiles = (s: StackEntry[]) => autoDistributeStack(s, result.layerHistogram, result.baseLayers, result.totalLayers);
+    const { id, stack, relief, print } = project;
+    const client = engine.client;
+    const apply = (next: (s: StackEntry[]) => StackEntry[]) =>
+      setProject((p) => (p.id === id && p.stack === stack ? { ...p, stack: normalizeStack(next(p.stack)) } : p), 'auto-distribute', merge);
+    if (!client || stack.length < 2) {
+      apply(quantiles);
+      return;
+    }
+    client
+      .autoTune({ relief, print, stack, simulateLineWidth, options: { reorder: false, tone: false, timeBudgetMs: 1500 } })
+      // Same filaments in the same order (reorder off), only the starts move.
+      .then((res) => apply(() => res.stack))
+      .catch(() => apply(quantiles));
+  };
+  const distributeSwapsRef = useRef(distributeSwaps);
+  distributeSwapsRef.current = distributeSwaps;
+
+  // After a new image (or colour preset), place the swaps once. Part of the
+  // import / preset step: undo goes straight back to before it.
   useEffect(() => {
     if (!result || !autoDistributePending.current) return;
     autoDistributePending.current = false;
-    // Part of the import / preset step: undo goes straight back to before it.
-    setProject(
-      (p) => ({
-        ...p,
-        stack: autoDistributeStack(p.stack, result.layerHistogram, result.baseLayers, result.totalLayers),
-      }),
-      'auto-distribute',
-      true,
-    );
-  }, [result, setProject]);
+    distributeSwapsRef.current(true);
+  }, [result]);
 
   /* ---------- autosave ---------- */
 
@@ -407,11 +454,12 @@ export function useWorkbench() {
   /** Builds a stroke from the current brush settings for the given points. */
   const makeStroke = useCallback(
     (id: string, points: number[], sampleLayer: number): PaintStroke | null => {
-      const tone = !brush.erase && brush.tool !== 'paint';
-      if (tone) {
+      const tool = brush.tool;
+      if (isClickTool(tool)) return null;
+      if (!brush.erase && tool !== 'paint') {
         return {
           id,
-          mode: brush.tool,
+          mode: tool,
           slotId: '',
           layer: totalLayers,
           radius: brush.sizeMm / 2 / project.print.widthMm,
@@ -456,13 +504,69 @@ export function useWorkbench() {
     [setProject],
   );
 
-  const autoDistribute = useCallback(() => {
-    if (!result) return;
-    updateStack(
-      (s) => autoDistributeStack(s, result.layerHistogram, result.baseLayers, result.totalLayers),
-      'auto-distribute',
-    );
-  }, [result, updateStack]);
+  /**
+   * Click with the paint bucket or a selection tool at an image-space point
+   * (one undo step). `add` / `subtract` (Shift / Ctrl) override the selection mode.
+   */
+  const clickTool = useCallback(
+    (u: number, v: number, mods: { add: boolean; subtract: boolean }) => {
+      const tool = brush.tool;
+      if (!isClickTool(tool)) return;
+      const base = { id: crypto.randomUUID(), layer: totalLayers, radius: 0, softness: 0, points: [u, v] };
+      let stroke: PaintStroke;
+      if (tool === 'fill') {
+        if (!brushSlot && !brush.erase) return;
+        stroke = {
+          ...base,
+          kind: 'fill',
+          mode: brush.erase ? 'erase' : 'paint',
+          slotId: brushSlot?.slotId ?? '',
+          opacity: brush.opacity,
+          tolerance: brush.fillTolerance,
+          contiguous: brush.fillContiguous,
+        };
+      } else {
+        stroke = {
+          ...base,
+          kind: 'select',
+          mode: 'paint',
+          slotId: '',
+          opacity: 1,
+          selectOp: mods.add ? 'add' : mods.subtract ? 'subtract' : brush.selectMode,
+          tolerance: brush.selectTolerance,
+          contiguous: tool === 'selectArea',
+        };
+      }
+      setProject((p) => ({ ...p, paint: [...(p.paint ?? []), stroke] }));
+    },
+    [brush, brushSlot, totalLayers, setProject],
+  );
+
+  /** A selection is active: strokes only touch the selected area. */
+  const hasSelection = !!result?.selection;
+
+  /** Inverts or drops the selection (one undo step). */
+  const changeSelection = useCallback(
+    (op: 'invert' | 'clear') => {
+      if (!hasSelection) return;
+      const stroke: PaintStroke = {
+        id: crypto.randomUUID(),
+        kind: 'select',
+        selectOp: op,
+        mode: 'paint',
+        slotId: '',
+        layer: 0,
+        radius: 0,
+        softness: 0,
+        opacity: 1,
+        points: [],
+      };
+      setProject((p) => ({ ...p, paint: [...(p.paint ?? []), stroke] }));
+    },
+    [hasSelection, setProject],
+  );
+
+  const autoDistribute = useCallback(() => distributeSwapsRef.current(false), []);
 
   /** Experimental: search the settings whose predicted print is closest to the image (one undo step). */
   const autoTune = useCallback(
@@ -737,6 +841,9 @@ export function useWorkbench() {
     brushSlot,
     paintStroke,
     clearPaint,
+    clickTool,
+    hasSelection,
+    changeSelection,
     openImageFile,
     colorPresets,
     colorPresetId,

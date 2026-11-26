@@ -193,12 +193,22 @@ export class EngineCore {
    * Relief with the brush strokes composited. The canvas holding every stroke
    * but the last is cached, and the stroke being drawn keeps its coverage, so
    * each update only rasterises the segments added since the last one.
+   * Fill and select strokes are single clicks: they are settled at once.
+   * Also returns the selection the strokes leave (owned by the cache).
    */
-  private painted(size: GridSize, relief: ReliefParams, t: Float32Array, strokes: PaintStroke[] | undefined, ctx: PaintContext): Float32Array {
-    if (!strokes || strokes.length === 0) return t;
+  private painted(
+    size: GridSize,
+    relief: ReliefParams,
+    t: Float32Array,
+    strokes: PaintStroke[] | undefined,
+    ctx: PaintContext,
+  ): { t: Float32Array; selection: Uint8Array | null } {
+    if (!strokes || strokes.length === 0) return { t, selection: null };
     const model = ctx.model;
     const key = `${reliefKey(size, relief)}|${model.layerHeightMm}|${model.firstLayerHeightMm}|${model.baseThicknessMm}|${model.maxHeightMm}|${ctx.cell ?? 1}|${ctx.colors.join(',')}`;
-    const settled = strokes.slice(0, -1);
+    const last = strokes[strokes.length - 1];
+    const liveBrush = (last.kind ?? 'brush') === 'brush';
+    const settled = liveBrush ? strokes.slice(0, -1) : strokes;
     let cache = this.paintCache;
     if (!cache || cache.key !== key || cache.base !== t || !cache.canvas.isPrefixOf(settled)) {
       cache = { key, base: t, canvas: new PaintCanvas(t, size.width, size.height, ctx) };
@@ -206,8 +216,9 @@ export class EngineCore {
     }
     const canvas = cache.canvas;
     for (let i = canvas.sigs.length; i < settled.length; i++) canvas.apply(settled[i]);
+    if (!liveBrush) return { t: canvas.current, selection: canvas.selection };
     if (!this.live || this.live.width !== size.width || this.live.height !== size.height) this.live = new LiveStroke(size.width, size.height);
-    return this.live.render(canvas, strokes[strokes.length - 1]);
+    return { t: this.live.render(canvas, last), selection: canvas.selection };
   }
 
   preview(params: PreviewParams): PreviewResult {
@@ -225,7 +236,7 @@ export class EngineCore {
     // does not jump when the toggle changes.
     const cell = lineCell(params.simulateLineWidth, print, size.width / grid.width);
     const colorStack = { stack: params.paintStack ?? params.stack, print };
-    const t = this.painted(grid, params.relief, this.relief(grid, params.relief, colorStack), params.paint, paintContext(params.paintStack ?? params.stack, print, model, cell));
+    const { t, selection } = this.painted(grid, params.relief, this.relief(grid, params.relief, colorStack), params.paint, paintContext(params.paintStack ?? params.stack, print, model, cell));
     const t2 = performance.now();
 
     const full = computeLayerField(t, model);
@@ -263,6 +274,8 @@ export class EngineCore {
       printedRgba,
       slicerRgba,
       layerField: field,
+      // Copied: the cached canvas keeps its own, and the worker transfers this one.
+      selection: selection ? selection.slice() : null,
       layerHistogram: layerHist,
       printedLut,
       slicerLut,

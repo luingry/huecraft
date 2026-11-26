@@ -128,6 +128,29 @@ export const IconBrush = make(
     <path d="M8.5 13.5c-2 0-3.5 1.5-3.5 3.5 0 1.5-1 2.5-2 3 3 .5 7-.5 7-4 0-1-.5-1.8-1.5-2.5z" />
   </>,
 );
+export const IconBucket = make(
+  <>
+    <path d="m10 3 8.5 8.5-6.5 6.5a2 2 0 0 1-2.8 0L3.5 12.3a2 2 0 0 1 0-2.8z" />
+    <path d="M4 11h13.5" />
+    <path d="M20.5 15.5s1.5 2 1.5 3a1.5 1.5 0 0 1-3 0c0-1 1.5-3 1.5-3z" />
+  </>,
+);
+/** Dashed area with a spark: select the connected area of a colour. */
+export const IconSelectArea = make(
+  <>
+    <path d="M4 9V5a1 1 0 0 1 1-1h4M14 4h1M4 14v1M9 20H5a1 1 0 0 1-1-1v-1" />
+    <path d="m11 20 8.5-8.5" />
+    <path d="m18 3 .8 1.7L20.5 5.5l-1.7.8L18 8l-.8-1.7-1.7-.8 1.7-.8z" />
+  </>,
+);
+/** Pipette: select a colour everywhere it shows. */
+export const IconSelectColor = make(
+  <>
+    <path d="m14 7 3 3" />
+    <path d="M16.5 4.5a2.1 2.1 0 0 1 3 3L18 9l-3-3z" />
+    <path d="m15 6-9.5 9.5L4 20l4.5-1.5L18 9" />
+  </>,
+);
 export const IconCheck = make(<path d="m5 12 5 5 9-10" />);
 export const IconSwap = make(
   <>

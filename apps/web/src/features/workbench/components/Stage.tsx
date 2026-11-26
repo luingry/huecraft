@@ -1,15 +1,18 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { faceDownPreview } from '@huecraft/engine';
 import { filamentIndexAtLayer, layerTopZ } from '@huecraft/project-schema';
 import {
   Button,
   IconBrush,
+  IconBucket,
   IconCompare,
   IconCube,
   IconImage,
   IconLayers,
   IconMoon,
   IconPalette,
+  IconSelectArea,
+  IconSelectColor,
   IconSun,
   Segmented,
   Switch,
@@ -17,7 +20,7 @@ import {
 import { formatMm, t } from '../../../i18n';
 import { readPref, writePref } from '../../project/storage';
 import { sortStack } from '../stack';
-import type { BrushTool, Workbench } from '../useWorkbench';
+import { isClickTool, type BrushTool, type Workbench } from '../useWorkbench';
 import { BrushMenu } from './BrushMenu';
 import { BitmapCanvas, IDENTITY, ImageViewport, RgbaCanvas, type ViewTransform } from './ImageViewport';
 import type { MeshColorMode } from './MeshView';
@@ -181,16 +184,19 @@ export function Stage({
                         softness: wb.brush.softness,
                         colorHex: brushColor ?? '#ffffff',
                         erase: wb.brush.erase,
+                        click: isClickTool(wb.brush.tool),
                       }
                     : null
                 }
+                selection={brushOn && !faceDown ? res.selection : null}
+                onClickTool={wb.clickTool}
                 onStroke={wb.paintStroke}
                 onBrushMenu={(x, y) => setBrushMenu({ x, y })}
                 onBrushSize={(sizeMm) => wb.setBrush({ sizeMm })}
               />
             </Suspense>
             <BrushToolbar wb={wb} disabled={faceDown} />
-            {brushOn && <div className="wb-brush-hint">{t.brush.hint}</div>}
+            {brushOn && <div className="wb-brush-hint">{isClickTool(wb.brush.tool) ? t.brush.clickHint : t.brush.hint}</div>}
             {brushOn && brushMenu && <BrushMenu wb={wb} x={brushMenu.x} y={brushMenu.y} onClose={closeBrushMenu} />}
             {faceDown ? (
               <div className="wb-orient-legend">{t.stage.faceDownLegend}</div>
@@ -256,10 +262,13 @@ export function Stage({
   );
 }
 
-const BRUSH_TOOLS: { tool: BrushTool; Icon: typeof IconBrush }[] = [
-  { tool: 'paint', Icon: IconBrush },
-  { tool: 'brighten', Icon: IconSun },
-  { tool: 'darken', Icon: IconMoon },
+const BRUSH_TOOLS: { tool: BrushTool; Icon: typeof IconBrush; key: string }[] = [
+  { tool: 'paint', Icon: IconBrush, key: 'B' },
+  { tool: 'brighten', Icon: IconSun, key: 'Shift+B' },
+  { tool: 'darken', Icon: IconMoon, key: 'Shift+B' },
+  { tool: 'fill', Icon: IconBucket, key: 'G' },
+  { tool: 'selectArea', Icon: IconSelectArea, key: 'W' },
+  { tool: 'selectColor', Icon: IconSelectColor, key: 'Shift+W' },
 ];
 
 /** One button per brush tool, on the left edge of the 3D view. Clicking the active tool turns the brush off. */
@@ -267,16 +276,17 @@ function BrushToolbar({ wb, disabled }: { wb: Workbench; disabled: boolean }) {
   const { brush, brushActive } = wb;
   return (
     <div className="wb-brush-tools" role="toolbar" aria-orientation="vertical" aria-label={t.brush.settings}>
-      {BRUSH_TOOLS.map(({ tool, Icon }) => {
+      {BRUSH_TOOLS.map(({ tool, Icon, key }) => {
         const on = brushActive && !disabled && brush.tool === tool;
         return (
+          <Fragment key={tool}>
+          {tool === 'fill' && <span className="wb-brush-tools__sep" aria-hidden />}
           <button
-            key={tool}
             type="button"
             className="wb-brush-tools__btn"
             aria-pressed={on}
             aria-label={t.brush.tools[tool]}
-            title={disabled ? t.stage.brushFaceUpOnly : `${t.brush.tools[tool]} — ${t.brush.toolHints[tool]} (B)`}
+            title={disabled ? t.stage.brushFaceUpOnly : `${t.brush.tools[tool]} — ${t.brush.toolHints[tool]} (${key})`}
             disabled={disabled}
             onClick={() => {
               if (on && !brush.erase) {
@@ -288,9 +298,10 @@ function BrushToolbar({ wb, disabled }: { wb: Workbench; disabled: boolean }) {
             }}
           >
             <Icon size={18} />
-            {tool === 'paint' && <span className="wb-brush-tools__dot" style={{ background: wb.brushSlot?.filament.colorHex }} />}
+            {(tool === 'paint' || tool === 'fill') && <span className="wb-brush-tools__dot" style={{ background: wb.brushSlot?.filament.colorHex }} />}
             {on && brush.erase && <span className="wb-brush-tools__erase" />}
           </button>
+          </Fragment>
         );
       })}
     </div>

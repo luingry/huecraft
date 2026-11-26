@@ -91,6 +91,9 @@ export type ProfileMode = 'basic' | 'advanced';
 
 export type PaintBlend = 'normal' | 'raise' | 'lower' | 'onLight' | 'onDark' | 'sampled';
 
+/** How a 'select' stroke combines with the current selection. */
+export type SelectOp = 'replace' | 'add' | 'subtract' | 'invert' | 'clear';
+
 /**
  * One brush stroke painted on the 3D view. Painting a filament pushes the
  * relief of the area to the top layer of that filament's band, so the colour
@@ -98,6 +101,19 @@ export type PaintBlend = 'normal' | 'raise' | 'lower' | 'onLight' | 'onDark' | '
  */
 export interface PaintStroke {
   id: string;
+  /**
+   * Missing / 'brush': a brush stroke along `points`. 'fill': paint bucket
+   * seeded at points[0..1], covering the colour there within `tolerance`
+   * (connected area only when `contiguous`). 'select': paints nothing; picks
+   * the same kind of area and combines it into the selection with `selectOp`.
+   * While a selection exists, every later stroke only touches selected columns.
+   * Fill and select judge the surface as it is when they are applied.
+   */
+  kind?: 'brush' | 'fill' | 'select';
+  /** fill / select: only the area connected to the seed (default true). */
+  contiguous?: boolean;
+  /** select: how the picked area combines with the selection (default 'replace'). */
+  selectOp?: SelectOp;
   /**
    * 'paint' pushes the area to a filament's band, 'erase' back to the unpainted
    * relief, 'brighten' / 'darken' move each column to a layer whose printed
@@ -118,6 +134,7 @@ export interface PaintStroke {
    * Colour blends, 0..1. 'sampled': max colour distance still painted (default 0.15).
    * 'onLight' / 'onDark': how much lighter / darker than the brush colour (in
    * luminance) a colour must be to be painted (default 0).
+   * fill / select: max colour distance from the colour at the seed (default 0.15).
    */
   tolerance?: number;
   /** Filament painted; the target layer follows its band when swaps move. */

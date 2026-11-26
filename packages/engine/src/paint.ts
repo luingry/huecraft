@@ -19,7 +19,7 @@ export function paintTargetLayer(stack: StackEntry[], slotId: string, totalLayer
 export function resolvePaintLayers(paint: PaintStroke[] | undefined, stack: StackEntry[], totalLayers: number): PaintStroke[] {
   if (!paint || paint.length === 0) return [];
   return paint.map((s) => {
-    const layer = s.mode === 'paint' ? paintTargetLayer(stack, s.slotId, totalLayers) : null;
+    const layer = s.mode === 'paint' && s.kind !== 'select' ? paintTargetLayer(stack, s.slotId, totalLayers) : null;
     return layer === null || layer === s.layer ? s : { ...s, layer };
   });
 }
@@ -32,7 +32,7 @@ function reliefForLayer(layer: number, model: LayerModel): number {
 }
 
 function signature(s: PaintStroke): string {
-  return `${s.id}:${s.points.length}:${s.mode}:${s.blend ?? 'normal'}:${s.layer}:${s.radius}:${s.softness}:${s.opacity}:${s.sampleLayer ?? ''}:${s.tolerance ?? ''}`;
+  return `${s.id}:${s.points.length}:${s.mode}:${s.blend ?? 'normal'}:${s.layer}:${s.radius}:${s.softness}:${s.opacity}:${s.sampleLayer ?? ''}:${s.tolerance ?? ''}:${s.kind ?? ''}:${s.contiguous ?? ''}:${s.selectOp ?? ''}`;
 }
 
 /** What colour-aware blends need: the layer geometry and the printed colour per layer count. */
@@ -80,11 +80,17 @@ function colorDistance(c: Uint8Array, a: number, b: number): number {
  * Brighten / darken strokes have no target: each column moves to the layer whose
  * colour is closest to its own luminance ± coverage × opacity × the printable
  * luminance range (only lighter / darker layers, the nearest height on ties).
+ * Fill strokes cover the colour at their seed (see `region`); select strokes
+ * only change `selection`, which clips every stroke applied after them.
  */
 export class PaintCanvas {
   readonly current: Float32Array;
   readonly sigs: string[] = [];
+  /** Selected columns (1) while a selection exists; strokes only touch these. */
+  selection: Uint8Array | null = null;
   private cov: Float32Array;
+  /** Layer shown per pixel (line-width blocks applied); cleared when the surface changes. */
+  private shownCache: Uint16Array | null = null;
   /** Layer count per quantised relief value. */
   private layerOf: Uint16Array;
   /** Relief of each layer count's plateau top. */
@@ -154,6 +160,7 @@ export class PaintCanvas {
     const c = new PaintCanvas(this.base, this.width, this.height, this.ctx);
     c.current.set(this.current);
     c.sigs.push(...this.sigs);
+    c.selection = this.selection ? this.selection.slice() : null;
     return c;
   }
 
@@ -166,6 +173,14 @@ export class PaintCanvas {
 
   apply(stroke: PaintStroke): void {
     this.sigs.push(signature(stroke));
+    if (stroke.kind === 'select') {
+      this.select(stroke);
+      return;
+    }
+    if (stroke.kind === 'fill') {
+      this.fillInto(stroke, this.current);
+      return;
+    }
     if (stroke.points.length < 2 || !(stroke.opacity > 0)) return;
     const box = rasterizeStroke(stroke, this.width, this.height, this.cov, 0, null);
     if (box) this.paintInto(stroke, this.cov, box, this.current, true);
@@ -177,6 +192,8 @@ export class PaintCanvas {
    * `consume` zeroes the coverage it reads, leaving `cov` clean for the next stroke.
    */
   paintInto(stroke: PaintStroke, cov: Float32Array, box: StrokeBox, out: Float32Array, consume: boolean): void {
+    if (out === this.current) this.shownCache = null;
+    const sel = this.selection;
     const { model, colors } = this.ctx;
     const { width: w, height: h, current, base } = this;
     const { x0, y0, x1, y1 } = box;
@@ -225,6 +242,7 @@ export class PaintCanvas {
         const c = cov[i];
         if (c <= 0) continue;
         if (consume) cov[i] = 0;
+        if (sel && !sel[i]) continue;
         const cur = current[i];
         // Layer the column shows (only the colour-aware strokes need it).
         const n = !toneTable && !colorBlend ? 0 : Math.min(maxN, cellLayer
@@ -245,6 +263,112 @@ export class PaintCanvas {
         out[i] = cur + (goal - cur) * c * op;
       }
     }
+  }
+
+  /** Layer count each pixel shows, judged like the colour blends (per line-width block). */
+  private shownLayers(): Uint16Array {
+    if (this.shownCache) return this.shownCache;
+    const { width: w, height: h, current, layerOf } = this;
+    const maxN = this.ctx.colors.length / 3 - 1;
+    const f = Math.max(1, Math.round(this.ctx.cell ?? 1));
+    const out = new Uint16Array(w * h);
+    const q = (v: number) => Math.min(maxN, layerOf[((v < 0 ? 0 : v > 1 ? 1 : v) * RELIEF_STEPS + 0.5) | 0]);
+    if (f === 1) {
+      for (let i = 0; i < out.length; i++) out[i] = q(current[i]);
+    } else {
+      for (let ya = 0; ya < h; ya += f) {
+        const yb = Math.min(h, ya + f);
+        for (let xa = 0; xa < w; xa += f) {
+          const xb = Math.min(w, xa + f);
+          let sum = 0;
+          for (let y = ya; y < yb; y++) for (let x = xa; x < xb; x++) sum += current[y * w + x];
+          const n = q(sum / ((yb - ya) * (xb - xa)));
+          for (let y = ya; y < yb; y++) out.fill(n, y * w + xa, y * w + xb);
+        }
+      }
+    }
+    this.shownCache = out;
+    return out;
+  }
+
+  /**
+   * Pixels whose shown colour is within `stroke.tolerance` (colour distance,
+   * default 0.15) of the colour at the seed points[0..1]: only those connected
+   * to the seed (4-neighbours) unless `contiguous` is false. Never leaves `within`.
+   */
+  region(stroke: PaintStroke, within: Uint8Array | null): Uint8Array {
+    const { width: w, height: h } = this;
+    const out = new Uint8Array(w * h);
+    const pts = stroke.points;
+    if (pts.length < 2) return out;
+    const sx = Math.min(w - 1, Math.max(0, Math.floor(pts[0] * w)));
+    const sy = Math.min(h - 1, Math.max(0, Math.floor(pts[1] * h)));
+    const seed = sy * w + sx;
+    if (within && !within[seed]) return out;
+    const shown = this.shownLayers();
+    const { colors } = this.ctx;
+    const tol = stroke.tolerance ?? 0.15;
+    const match = new Uint8Array(colors.length / 3);
+    for (let n = 0; n < match.length; n++) match[n] = colorDistance(colors, n, shown[seed]) <= tol + 1e-6 ? 1 : 0;
+    if (stroke.contiguous === false) {
+      for (let i = 0; i < out.length; i++) if (match[shown[i]] && (!within || within[i])) out[i] = 1;
+      return out;
+    }
+    // Pixels are marked when pushed, so the stack never holds one twice.
+    const stack = new Int32Array(w * h);
+    let top = 0;
+    out[seed] = 1;
+    stack[top++] = seed;
+    while (top > 0) {
+      const i = stack[--top];
+      const x = i % w;
+      for (let k = 0; k < 4; k++) {
+        const j = k === 0 ? (x > 0 ? i - 1 : -1) : k === 1 ? (x < w - 1 ? i + 1 : -1) : k === 2 ? i - w : i + w;
+        if (j < 0 || j >= out.length || out[j] || !match[shown[j]] || (within && !within[j])) continue;
+        out[j] = 1;
+        stack[top++] = j;
+      }
+    }
+    return out;
+  }
+
+  /** Combines the area a select stroke picks into the selection. An empty selection is no selection. */
+  private select(stroke: PaintStroke): void {
+    const op = stroke.selectOp ?? 'replace';
+    const cur = this.selection;
+    let next: Uint8Array | null;
+    if (op === 'clear') next = null;
+    else if (op === 'invert') next = cur ? cur.map((v) => 1 - v) : null;
+    else if (op === 'subtract') {
+      if (!cur) return;
+      const r = this.region(stroke, cur);
+      next = cur.map((v, i) => v & (1 - r[i]));
+    } else {
+      const r = this.region(stroke, null);
+      next = op === 'add' && cur ? r.map((v, i) => v | cur[i]) : r;
+    }
+    this.selection = next && next.includes(1) ? next : null;
+  }
+
+  /** Paint bucket: `stroke` (paint / erase, normal blend) over its region, inside the selection. */
+  fillInto(stroke: PaintStroke, out: Float32Array): void {
+    if (!(stroke.opacity > 0)) return;
+    const w = this.width;
+    const reg = this.region(stroke, this.selection);
+    let box: StrokeBox | null = null;
+    for (let i = 0; i < reg.length; i++) {
+      if (!reg[i]) continue;
+      this.cov[i] = 1;
+      const x = i % w;
+      const y = (i / w) | 0;
+      if (!box) box = { x0: x, y0: y, x1: x, y1: y };
+      else {
+        if (x < box.x0) box.x0 = x;
+        if (x > box.x1) box.x1 = x;
+        box.y1 = y;
+      }
+    }
+    if (box) this.paintInto({ ...stroke, kind: 'brush', blend: 'normal' }, this.cov, box, out, true);
   }
 
   /** Copy of the painted relief. */

@@ -57,6 +57,19 @@ export function Workbench() {
       } else if (mod && key === 's') {
         // Autosave already runs; swallow the browser "save page" dialog.
         e.preventDefault();
+      } else if (mod && key === 'd' && !isTyping(e.target) && w.hasSelection) {
+        e.preventDefault();
+        w.changeSelection('clear');
+      } else if (mod && key === 'i' && !isTyping(e.target) && w.hasSelection) {
+        e.preventDefault();
+        w.changeSelection('invert');
+      } else if (!mod && !e.altKey && !isTyping(e.target) && !e.repeat && (key === 'g' || key === 'w')) {
+        // G: paint bucket · W: area selection · Shift+W: colour selection.
+        const tool: BrushTool = key === 'g' ? 'fill' : e.shiftKey ? 'selectColor' : 'selectArea';
+        w.setBrush({ tool, erase: false });
+        if (tabRef.current !== '3d') setTab('3d');
+        if (w.orientation !== 'faceUp') w.setOrientation('faceUp');
+        w.setBrushActive(true);
       } else if (!mod && !e.altKey && !isTyping(e.target) && /^[1-5]$/.test(e.key)) {
         setTab(STAGE_TABS[Number(e.key) - 1]);
       } else if (!mod && !e.altKey && !isTyping(e.target) && key === 'b' && e.shiftKey) {

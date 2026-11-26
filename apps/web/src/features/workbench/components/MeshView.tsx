@@ -12,6 +12,17 @@ export interface MeshBrush {
   /** Ring colour (the painted filament). */
   colorHex: string;
   erase: boolean;
+  /** Click tool (paint bucket, selections): a left click picks a point instead of painting a stroke. */
+  click: boolean;
+}
+
+/** Selection overlay: dims what is outside, marching ants along the edge. */
+interface SelectionUniforms {
+  uSel: { value: THREE.DataTexture | null };
+  uSelOn: { value: number };
+  uSelSize: { value: THREE.Vector2 };
+  uSelTexel: { value: THREE.Vector2 };
+  uTime: { value: number };
 }
 
 /** Engine colours are sRGB; three.js expects linear vertex colours. */
@@ -71,6 +82,7 @@ interface Viewer {
   mesh: THREE.Mesh | null;
 
   cut: { uCutZ: { value: number }; uCutColor: { value: THREE.Color } };
+  sel: SelectionUniforms;
   cursor: { group: THREE.Group; outer: THREE.LineLoop; inner: THREE.LineLoop };
   framedFor: string;
   frame: () => void;
@@ -84,7 +96,9 @@ interface Viewer {
  * for the brush menu (Alt + right drag resizes it); orbiting moves to the middle
  * button, and Alt + left drag turns the model itself.
  * With `faceDown` it shows the flat slab of a face-down print, image side up
- * (no brush or layer cut there).
+ * (no brush or layer cut there). A click tool (`brush.click`) reports left
+ * clicks on the model through `onClickTool` (Shift = add, Ctrl = subtract).
+ * `selection` (one byte per preview pixel) is drawn over the model.
  */
 export function MeshView({
   result,
@@ -96,6 +110,8 @@ export function MeshView({
   background,
   resetToken,
   brush,
+  selection = null,
+  onClickTool,
   onStroke,
   onBrushMenu,
   onBrushSize,
@@ -110,6 +126,9 @@ export function MeshView({
   background: string;
   resetToken: number;
   brush: MeshBrush | null;
+  selection?: Uint8Array | null;
+  /** Click tool: image-space point clicked (v down), with the modifier keys held. */
+  onClickTool: (u: number, v: number, mods: { add: boolean; subtract: boolean }) => void;
   /**
    * Stroke in image space (u, v pairs, v down); `done` on release.
    * `sampleLayer` is the layer count under the brush centre when it began.
@@ -122,8 +141,8 @@ export function MeshView({
   const mountRef = useRef<HTMLDivElement>(null);
   const viewer = useRef<Viewer | null>(null);
   // Latest props for the native event handlers, which are registered once.
-  const live = useRef({ result, brush, onStroke, onBrushMenu, onBrushSize, layerZ, cutZ: 1e6 });
-  live.current = { ...live.current, result, brush, onStroke, onBrushMenu, onBrushSize, layerZ };
+  const live = useRef({ result, brush, onStroke, onClickTool, onBrushMenu, onBrushSize, layerZ, cutZ: 1e6 });
+  live.current = { ...live.current, result, brush, onStroke, onClickTool, onBrushMenu, onBrushSize, layerZ };
 
   useEffect(() => {
     const mount = mountRef.current!;
@@ -151,6 +170,13 @@ export function MeshView({
     const group = new THREE.Group();
     scene.add(group);
     const cut = { uCutZ: { value: 1e6 }, uCutColor: { value: new THREE.Color() } };
+    const sel: SelectionUniforms = {
+      uSel: { value: null },
+      uSelOn: { value: 0 },
+      uSelSize: { value: new THREE.Vector2(1, 1) },
+      uSelTexel: { value: new THREE.Vector2(1, 1) },
+      uTime: { value: 0 },
+    };
     const cursor = { group: new THREE.Group(), outer: makeRing(), inner: makeRing() };
     cursor.group.add(cursor.outer, cursor.inner);
     cursor.group.visible = false;
@@ -165,6 +191,7 @@ export function MeshView({
       group,
       mesh: null,
       cut,
+      sel,
       cursor,
       framedFor: '',
       frame: () => {
@@ -280,7 +307,7 @@ export function MeshView({
 
     const placeCursor = (hit: Hit | null, sizeMm?: number) => {
       const b = live.current.brush;
-      if (!hit || !b) {
+      if (!hit || !b || b.click) {
         cursor.group.visible = false;
         return;
       }
@@ -421,6 +448,10 @@ export function MeshView({
       const hit = hitTest(e.clientX, e.clientY);
       if (!hit) return;
       e.stopPropagation();
+      if (b.click) {
+        live.current.onClickTool(hit.u, hit.v, { add: e.shiftKey, subtract: e.ctrlKey || e.metaKey });
+        return;
+      }
       mount.setPointerCapture(e.pointerId);
       stroke = { id: crypto.randomUUID(), points: [], pointerId: e.pointerId, sampleLayer: hit.layer, line: null };
       addPoint(hit);
@@ -517,6 +548,7 @@ export function MeshView({
     let raf = 0;
     const loop = () => {
       raf = requestAnimationFrame(loop);
+      sel.uTime.value = performance.now() / 1000;
       controls.update();
       renderer.render(scene, camera);
     };
@@ -537,6 +569,7 @@ export function MeshView({
       ro.disconnect();
       controls.dispose();
       if (v.mesh) disposeTree(v.mesh);
+      sel.uSel.value?.dispose();
       for (const ring of [cursor.outer, cursor.inner]) {
         ring.geometry.dispose();
         (ring.material as THREE.Material).dispose();
@@ -577,15 +610,37 @@ export function MeshView({
     // solid layer instead of a hollow shell. Flattened tops take the cut layer's
     // colour; walls just get shorter and keep theirs.
     mat.onBeforeCompile = (shader) => {
-      Object.assign(shader.uniforms, v.cut);
+      Object.assign(shader.uniforms, v.cut, v.sel);
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\nuniform float uCutZ;\nuniform vec3 uCutColor;')
+        .replace('#include <common>', '#include <common>\nuniform float uCutZ;\nuniform vec3 uCutColor;\nuniform vec2 uSelSize;\nvarying vec2 vSelUv;')
         .replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
+          // Image space of the selection mask: row 0 is the image top (y = height).
+          vSelUv = vec2(position.x / uSelSize.x, 1.0 - position.y / uSelSize.y);
           if (transformed.z > uCutZ) {
             transformed.z = uCutZ;
             if (objectNormal.z > 0.5) vColor = uCutColor;
+          }`,
+        );
+      // Outside the selection is dimmed; its edge gets animated black / white dashes.
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          '#include <common>',
+          '#include <common>\nuniform sampler2D uSel;\nuniform float uSelOn;\nuniform vec2 uSelTexel;\nuniform float uTime;\nvarying vec2 vSelUv;',
+        )
+        .replace(
+          '#include <dithering_fragment>',
+          `#include <dithering_fragment>
+          if (uSelOn > 0.5) {
+            float s = texture(uSel, vSelUv).r;
+            float n = texture(uSel, vSelUv + vec2(uSelTexel.x, 0.0)).r + texture(uSel, vSelUv - vec2(uSelTexel.x, 0.0)).r
+              + texture(uSel, vSelUv + vec2(0.0, uSelTexel.y)).r + texture(uSel, vSelUv - vec2(0.0, uSelTexel.y)).r;
+            if (s < 0.5) gl_FragColor.rgb *= 0.4;
+            if (s > 0.5 ? n < 3.5 : n > 0.5) {
+              float ant = step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) / 10.0 - uTime * 1.2));
+              gl_FragColor.rgb = vec3(ant);
+            }
           }`,
         );
     };
@@ -614,6 +669,29 @@ export function MeshView({
     const v = viewer.current;
     if (v) v.scene.background = new THREE.Color(background);
   }, [background]);
+
+  // Selection mask → texture over the terraced model (not the face-down slab).
+  useEffect(() => {
+    const v = viewer.current;
+    if (!v) return;
+    const { sel } = v;
+    sel.uSel.value?.dispose();
+    sel.uSel.value = null;
+    sel.uSelOn.value = 0;
+    if (!selection || faceDown || selection.length !== result.width * result.height) return;
+    const data = new Uint8Array(selection.length);
+    for (let i = 0; i < data.length; i++) data[i] = selection[i] ? 255 : 0;
+    const tex = new THREE.DataTexture(data, result.width, result.height, THREE.RedFormat, THREE.UnsignedByteType);
+    // Rows are one byte per pixel: any width must upload unpadded.
+    tex.unpackAlignment = 1;
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.needsUpdate = true;
+    sel.uSel.value = tex;
+    sel.uSelOn.value = 1;
+    sel.uSelSize.value.set(result.sizeMm.width, result.sizeMm.height);
+    sel.uSelTexel.value.set(1 / result.width, 1 / result.height);
+  }, [selection, result, faceDown]);
 
   useEffect(() => {
     if (resetToken > 0) viewer.current?.frame();

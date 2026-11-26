@@ -3,10 +3,11 @@ import { Button, IconTrash, Slider, Switch } from '@huecraft/design-system';
 import type { PaintBlend } from '@huecraft/project-schema';
 import { t } from '../../../i18n';
 import { sortStack } from '../stack';
-import { isColorBlend, type BrushTool, type Workbench } from '../useWorkbench';
+import { isClickTool, isColorBlend, type BrushTool, type SelectMode, type Workbench } from '../useWorkbench';
 
 const BLENDS: PaintBlend[] = ['normal', 'sampled', 'onLight', 'onDark', 'raise', 'lower'];
-const TOOLS: BrushTool[] = ['paint', 'brighten', 'darken'];
+const TOOLS: BrushTool[] = ['paint', 'brighten', 'darken', 'fill', 'selectArea', 'selectColor'];
+const SELECT_MODES: SelectMode[] = ['replace', 'add', 'subtract'];
 
 /** Brush settings popover, opened with a right-click on the 3D view. */
 export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: number; onClose: () => void }) {
@@ -16,7 +17,12 @@ export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: 
   const maxSize = Math.max(10, Math.round(wb.project.print.widthMm / 3));
   const stack = sortStack(wb.project.stack).reverse();
   const paintCount = wb.project.paint?.length ?? 0;
-  const painting = brush.tool === 'paint' && !brush.erase;
+  const tool = brush.tool;
+  const click = isClickTool(tool);
+  const selecting = tool === 'selectArea' || tool === 'selectColor';
+  const painting = tool === 'paint' && !brush.erase;
+  // Tools that put a filament down (the eraser undoes them).
+  const usesColor = tool === 'paint' || tool === 'fill';
 
   // Keep the popover inside the window.
   useLayoutEffect(() => {
@@ -27,7 +33,7 @@ export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: 
       left: Math.max(8, Math.min(x, window.innerWidth - r.width - 8)),
       top: Math.max(8, Math.min(y, window.innerHeight - r.height - 8)),
     });
-  }, [x, y]);
+  }, [x, y, tool]);
 
   useEffect(() => {
     const onDown = (e: PointerEvent) => {
@@ -66,30 +72,35 @@ export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: 
       <div className="wb-brush-menu__body">
         <div className="hc-field">
           <span className="hc-field__label">{t.brush.tool}</span>
-          <div className="hc-seg" role="group" aria-label={t.brush.tool}>
-            {TOOLS.map((tool) => (
+          <div className="hc-seg wb-brush-menu__tools" role="group" aria-label={t.brush.tool}>
+            {TOOLS.map((item) => (
               <button
-                key={tool}
+                key={item}
                 type="button"
                 className="hc-seg__item"
-                aria-pressed={!brush.erase && brush.tool === tool}
-                title={t.brush.toolHints[tool]}
-                onClick={() => setBrush({ tool, erase: false })}
+                aria-pressed={!brush.erase && tool === item}
+                title={t.brush.toolHints[item]}
+                onClick={() => setBrush({ tool: item, erase: false })}
               >
-                {t.brush.tools[tool]}
+                {t.brush.tools[item]}
               </button>
             ))}
           </div>
-          <span className="hc-field__hint">{t.brush.toolHints[brush.tool]}</span>
+          <span className="hc-field__hint">{t.brush.toolHints[tool]}</span>
         </div>
-        <Slider label={t.brush.size} value={brush.sizeMm} min={0.5} max={maxSize} step={0.5} unit="mm" inputMax={200} onChange={(v) => setBrush({ sizeMm: Math.max(0.2, v) })} />
-        <Slider label={t.brush.softness} value={Math.round(brush.softness * 100)} min={0} max={100} step={1} unit="%" onChange={(v) => setBrush({ softness: v / 100 })} />
-        {brush.tool === 'paint' || brush.erase ? (
+        {!click && (
+          <>
+            <Slider label={t.brush.size} value={brush.sizeMm} min={0.5} max={maxSize} step={0.5} unit="mm" inputMax={200} onChange={(v) => setBrush({ sizeMm: Math.max(0.2, v) })} />
+            <Slider label={t.brush.softness} value={Math.round(brush.softness * 100)} min={0} max={100} step={1} unit="%" onChange={(v) => setBrush({ softness: v / 100 })} />
+          </>
+        )}
+        {(usesColor || brush.erase) && (
           <Slider label={t.brush.opacity} value={Math.round(brush.opacity * 100)} min={1} max={100} step={1} unit="%" onChange={(v) => setBrush({ opacity: Math.max(1, v) / 100 })} />
-        ) : (
+        )}
+        {(tool === 'brighten' || tool === 'darken') && !brush.erase && (
           <Slider label={t.brush.strength} value={Math.round(brush.toneStrength * 100)} min={1} max={100} step={1} unit="%" hint={t.brush.strengthHint} onChange={(v) => setBrush({ toneStrength: Math.min(100, Math.max(1, v)) / 100 })} />
         )}
-        {brush.tool === 'paint' && (
+        {usesColor && (
           <div className="hc-field">
             <span className="hc-field__label">{t.brush.color}</span>
             <div className="wb-brush-menu__swatches" role="group" aria-label={t.brush.color}>
@@ -108,6 +119,46 @@ export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: 
             </div>
             <span className="hc-field__hint">{t.brush.colorHint}</span>
           </div>
+        )}
+        {tool === 'fill' && (
+          <>
+            <Slider
+              label={t.brush.fillTolerance}
+              value={Math.round(brush.fillTolerance * 100)}
+              min={0}
+              max={100}
+              step={1}
+              unit="%"
+              hint={t.brush.fillToleranceHint}
+              onChange={(v) => setBrush({ fillTolerance: Math.min(100, Math.max(0, v)) / 100 })}
+            />
+            <Switch label={t.brush.contiguous} hint={t.brush.contiguousHint} checked={brush.fillContiguous} onChange={(v) => setBrush({ fillContiguous: v })} />
+          </>
+        )}
+        {selecting && (
+          <>
+            <Slider
+              label={t.brush.fillTolerance}
+              value={Math.round(brush.selectTolerance * 100)}
+              min={0}
+              max={100}
+              step={1}
+              unit="%"
+              hint={t.brush.selectToleranceHint}
+              onChange={(v) => setBrush({ selectTolerance: Math.min(100, Math.max(0, v)) / 100 })}
+            />
+            <div className="hc-field">
+              <span className="hc-field__label">{t.brush.selectMode}</span>
+              <div className="hc-seg wb-brush-menu__modes" role="group" aria-label={t.brush.selectMode}>
+                {SELECT_MODES.map((m) => (
+                  <button key={m} type="button" className="hc-seg__item" aria-pressed={brush.selectMode === m} onClick={() => setBrush({ selectMode: m })}>
+                    {t.brush.selectModes[m]}
+                  </button>
+                ))}
+              </div>
+              <span className="hc-field__hint">{t.brush.selectModeHint}</span>
+            </div>
+          </>
         )}
         {painting && (
           <div className="hc-field">
@@ -142,7 +193,21 @@ export function BrushMenu({ wb, x, y, onClose }: { wb: Workbench; x: number; y: 
             onChange={(v) => setBrush({ tolerances: { ...brush.tolerances, [brush.blend]: Math.min(100, Math.max(0, v)) / 100 } })}
           />
         )}
-        <Switch label={t.brush.erase} checked={brush.erase} onChange={(v) => setBrush({ erase: v })} />
+        {!selecting && <Switch label={t.brush.erase} checked={brush.erase} onChange={(v) => setBrush({ erase: v })} />}
+        {(selecting || wb.hasSelection) && (
+          <div className="hc-field">
+            <span className="hc-field__label">{t.brush.selection}</span>
+            <div className="wb-brush-menu__row">
+              <Button size="sm" disabled={!wb.hasSelection} onClick={() => wb.changeSelection('invert')}>
+                {t.brush.invertSelection}
+              </Button>
+              <Button size="sm" disabled={!wb.hasSelection} onClick={() => wb.changeSelection('clear')}>
+                {t.brush.clearSelection}
+              </Button>
+            </div>
+            <span className="hc-field__hint">{wb.hasSelection ? t.brush.selectionActive : t.brush.selectionNone}</span>
+          </div>
+        )}
       </div>
       <div className="hc-menu__sep" />
       <Button

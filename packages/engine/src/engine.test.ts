@@ -525,3 +525,128 @@ describe('face-down colour depth', () => {
     expect(map[19]).toBe(19);
   });
 });
+
+describe('paint bucket and selection', () => {
+  // Black | white | black columns: two separate dark areas of the same colour.
+  function bands(width: number, height: number): SourceImage {
+    const rgba = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const o = (y * width + x) * 4;
+        const v = x >= width / 3 && x < (2 * width) / 3 ? 255 : 0;
+        rgba[o] = rgba[o + 1] = rgba[o + 2] = v;
+        rgba[o + 3] = 255;
+      }
+    }
+    return { width, height, rgba };
+  }
+  const image = bands(90, 60);
+  const plain = runPreview(image, previewParams());
+  const top = plain.totalLayers;
+  const at = (r: { width: number; height: number; layerField: Uint16Array }, u: number, v = 0.5) =>
+    r.layerField[Math.floor(v * r.height) * r.width + Math.floor(u * r.width)];
+  const fill = (over: Partial<PaintStroke> = {}): PaintStroke => ({
+    id: 'f1',
+    kind: 'fill',
+    mode: 'paint',
+    slotId: 'b',
+    layer: 10,
+    radius: 0,
+    softness: 0,
+    opacity: 1,
+    tolerance: 0,
+    points: [0.1, 0.5],
+    ...over,
+  });
+  const select = (over: Partial<PaintStroke> = {}): PaintStroke => ({ ...fill({ id: 'sel', ...over }), kind: 'select' });
+  const brushAll: PaintStroke = {
+    id: 'b1',
+    mode: 'paint',
+    slotId: 'b',
+    layer: 10,
+    radius: 1,
+    softness: 0,
+    opacity: 1,
+    points: [0.5, 0.5, 0.51, 0.5],
+  };
+
+  it('the dark and light bands show different layers', () => {
+    expect(at(plain, 0.1)).not.toBe(at(plain, 0.5));
+    expect(at(plain, 0.1)).toBe(at(plain, 0.9));
+    expect(plain.selection).toBeNull();
+  });
+
+  it('fills only the connected area of the clicked colour', () => {
+    const r = runPreview(image, previewParams({ paint: [fill()] }));
+    expect(at(r, 0.1)).toBe(10);
+    expect(at(r, 0.5)).toBe(at(plain, 0.5));
+    expect(at(r, 0.9)).toBe(at(plain, 0.9));
+  });
+
+  it('a non-contiguous fill covers the colour everywhere, and tolerance widens it', () => {
+    const r = runPreview(image, previewParams({ paint: [fill({ contiguous: false })] }));
+    expect(at(r, 0.1)).toBe(10);
+    expect(at(r, 0.9)).toBe(10);
+    expect(at(r, 0.5)).toBe(at(plain, 0.5));
+    const wide = runPreview(image, previewParams({ paint: [fill({ tolerance: 1 })] }));
+    for (const u of [0.1, 0.5, 0.9]) expect(at(wide, u)).toBe(10);
+  });
+
+  it('erase fill restores the unpainted relief', () => {
+    // Both dark bands go to layer 10; erasing the connected area at the right one restores only it.
+    const r = runPreview(image, previewParams({ paint: [fill({ contiguous: false }), fill({ id: 'f2', mode: 'erase', points: [0.9, 0.5] })] }));
+    expect(at(r, 0.9)).toBe(at(plain, 0.9));
+    expect(at(r, 0.1)).toBe(10);
+  });
+
+  it('area and colour selections clip later strokes', () => {
+    const area = runPreview(image, previewParams({ paint: [select(), brushAll] }));
+    expect(at(area, 0.1)).toBe(10);
+    expect(at(area, 0.5)).toBe(at(plain, 0.5));
+    expect(at(area, 0.9)).toBe(at(plain, 0.9));
+    expect(area.selection?.[Math.floor(0.5 * area.height) * area.width + 2]).toBe(1);
+    expect(area.selection?.[Math.floor(0.5 * area.height) * area.width + area.width - 2]).toBe(0);
+
+    const color = runPreview(image, previewParams({ paint: [select({ contiguous: false }), brushAll] }));
+    expect(at(color, 0.1)).toBe(10);
+    expect(at(color, 0.9)).toBe(10);
+    expect(at(color, 0.5)).toBe(at(plain, 0.5));
+  });
+
+  it('add, subtract, invert and clear combine selections', () => {
+    const run = (...sels: PaintStroke[]) => runPreview(image, previewParams({ paint: [...sels.map((s, i) => ({ ...s, id: `s${i}` })), brushAll] }));
+    const added = run(select(), select({ selectOp: 'add', points: [0.5, 0.5] }));
+    expect([at(added, 0.1), at(added, 0.5), at(added, 0.9)]).toEqual([10, 10, at(plain, 0.9)]);
+    const subtracted = run(select({ contiguous: false }), select({ selectOp: 'subtract', points: [0.9, 0.5] }));
+    expect([at(subtracted, 0.1), at(subtracted, 0.9)]).toEqual([10, at(plain, 0.9)]);
+    const inverted = run(select(), select({ selectOp: 'invert' }));
+    expect([at(inverted, 0.1), at(inverted, 0.5), at(inverted, 0.9)]).toEqual([at(plain, 0.1), 10, 10]);
+    const cleared = run(select(), select({ selectOp: 'clear' }));
+    expect(cleared.selection).toBeNull();
+    for (const u of [0.1, 0.5, 0.9]) expect(at(cleared, u)).toBe(10);
+  });
+
+  it('a fill never leaves the selection', () => {
+    // Tolerance 1 matches every colour, but the selection holds only the left band.
+    const r = runPreview(image, previewParams({ paint: [select(), fill({ tolerance: 1 })] }));
+    expect([at(r, 0.1), at(r, 0.5), at(r, 0.9)]).toEqual([10, at(plain, 0.5), at(plain, 0.9)]);
+    const outside = runPreview(image, previewParams({ paint: [select(), fill({ tolerance: 1, points: [0.9, 0.5] })] }));
+    expect(Array.from(outside.layerField)).toEqual(Array.from(plain.layerField));
+  });
+
+  it('cached painting with fills and selections matches a fresh run, and exports them', () => {
+    const core = new EngineCore();
+    core.setImage(image);
+    const strokes = [select({ contiguous: false }), fill({ layer: 14, slotId: 'c' }), brushAll];
+    core.preview(previewParams({ paint: strokes.slice(0, 1) }));
+    core.preview(previewParams({ paint: strokes.slice(0, 2) }));
+    const cached = core.preview(previewParams({ paint: strokes }));
+    const fresh = runPreview(image, previewParams({ paint: strokes }));
+    expect(Array.from(cached.layerField)).toEqual(Array.from(fresh.layerField));
+    expect(Array.from(cached.selection ?? [])).toEqual(Array.from(fresh.selection ?? []));
+    const exp = runExport(image, { name: 'p', relief: DEFAULT_RELIEF, print, stack, swapCommand: 'pause', format: 'stl', paint: [fill()] });
+    const none = runExport(image, { name: 'p', relief: DEFAULT_RELIEF, print, stack, swapCommand: 'pause', format: 'stl' });
+    expect(exp.bytes).not.toEqual(none.bytes);
+    expect(top).toBeGreaterThan(10);
+  });
+});
