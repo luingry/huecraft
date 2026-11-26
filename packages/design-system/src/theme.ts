@@ -156,7 +156,7 @@ button { cursor: pointer; }
 .hc-range:focus-visible::-webkit-slider-thumb { box-shadow: var(--focus); }
 
 /* Switch */
-.hc-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; min-height: 24px; }
+.hc-switch { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; min-height: 24px; }
 .hc-switch__track {
   position: relative; width: 30px; height: 18px; border-radius: 18px; flex-shrink: 0;
   background: var(--hover); transition: background var(--fast);

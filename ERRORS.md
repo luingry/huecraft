@@ -74,3 +74,9 @@
 - **Symptom:** an image with a large white background (e.g. a silhouette on a white page) opens with the background predicted as beige / pinkish, as if tinted by the other colours of the image. The colour reading itself is right (white is picked as a filament).
 - **Cause:** on import (and on a colour preset), `autoDistributeStack` placed the swaps by pixel quantiles of the relief. ~85 % of the pixels are the white background at full height, so every quantile fell on the top layer and the swaps were squeezed to the last layers (26/27/28 of 29). White got one 0.08 mm layer over one orange and one red layer on black: with TD ≈ 1.2 mm that layer hides only ~18 % of what is below.
 - **Fix:** the import / preset step now runs a swaps-only auto-tune in the worker (`reorder: false, tone: false`, 1.5 s budget, ~40 ms in practice), which scores the predicted print colours, and falls back to the quantiles on error. Same image: swaps 5/11/13, background (243, 241, 241), colour error 36 → 5. The "Distribuir" button uses the same placement (`distributeSwaps` in `useWorkbench.ts`).
+
+## App "encolhe"/sobe e deixa faixa vazia embaixo ao clicar num toggle
+- **Sintoma:** ao ativar um switch (ex.: "Alinhar alturas às camadas") com a coluna de controles rolada, a UI inteira sobe e sobra área vazia embaixo; persiste após refresh (restauração de scroll).
+- **Causa raiz:** o `<input>` oculto do `.hc-switch` era `position: absolute` sem ancestral posicionado. Ele escapava do clipping de `.wb-controls` (overflow só recorta filhos cujo containing block está dentro), aumentava o `scrollHeight` do `<html>`, e ao receber foco o navegador rolava o `<html>` (body `overflow:hidden` ainda é rolável programaticamente).
+- **Solução:** `.hc-switch { position: relative; }` em `packages/design-system/src/theme.ts`.
+- **Evitar:** todo elemento `position:absolute` escondido (inputs de toggle/checkbox) precisa de um pai posicionado dentro do container rolável.
