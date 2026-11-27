@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readArchiveText } from '@huecraft/exporters';
+import { exportStlZip, PROJECT_SETTINGS_PATH, readArchiveText } from '@huecraft/exporters';
 import {
   DEFAULT_PRINT,
   DEFAULT_RELIEF,
@@ -350,6 +350,22 @@ describe('export', () => {
     expect(files['Metadata/hueCraft_swap_plan.txt']).toBe(r.swapText);
     expect(r.swapText).toContain('Layer 9 (Z 0.800 mm) → pause, load "b" #ff0000');
     expect(r.swapText).toContain('total layers: 19');
+  });
+
+  it('face up with a slicer template: a single object, no note (keeps per-layer colour change)', () => {
+    const settings: Record<string, unknown> = { layer_height: '0.08', initial_layer_print_height: '0.16', filament_colour: ['#00AE42'], printable_area: ['0x0', '256x0', '256x256', '0x256'] };
+    for (let i = 0; i < 30; i++) settings[`k${i}`] = String(i);
+    const slicerTemplate = exportStlZip([], {
+      '3D/3dmodel.model': '<?xml version="1.0"?><model><metadata name="Application">BambuStudio-02.08.03.66</metadata></model>',
+      [PROJECT_SETTINGS_PATH]: JSON.stringify(settings),
+    });
+    const r = runExport(gradient(40, 40), { name: 'Tpl', relief: DEFAULT_RELIEF, print, stack, swapCommand: 'pause', format: '3mf', slicerTemplate });
+    const files = readArchiveText(r.bytes);
+    expect(files[PROJECT_SETTINGS_PATH]).toBeDefined();
+    const model = files['3D/3dmodel.model'];
+    expect(model.match(/<object id=/g)).toHaveLength(1);
+    expect(model.match(/<item /g)).toHaveLength(1);
+    expect(model).not.toContain('printable="0"');
   });
 
   it('face down: one watertight part per filament that together fill the slab', () => {

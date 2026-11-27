@@ -98,8 +98,9 @@ export interface ExportRequestParams {
    */
   slicerTemplate?: Uint8Array;
   /**
-   * With a slicer template: put the swap plan in front of the model as 3D text,
-   * written as a separate non-printable object (visible in the slicer, never printed). Default true.
+   * Face-down (parts) 3MF with a slicer template: put the filament plan on the
+   * bed as 3D text, a separate non-printable object. Default true. Face-up
+   * exports never carry it: a second object breaks per-layer colour change.
    */
   slicerNote?: boolean;
 }

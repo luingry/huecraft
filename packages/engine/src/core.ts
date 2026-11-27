@@ -27,7 +27,7 @@ import {
 } from '@huecraft/optics';
 import { buildSolidHeightfieldMesh, buildTerracedMesh, buildTerracedSolidMesh } from '@huecraft/mesh';
 import { export3mf, exportBambuPartsProject, exportBinaryStl, exportStlZip, readSlicerProjectTemplate, type SlicerSwap } from '@huecraft/exporters';
-import { buildSlicerNote, faceDownNoteLines, swapNoteLines } from './slicerNote.js';
+import { buildSlicerNote, faceDownNoteLines } from './slicerNote.js';
 import { adjustColorTarget, colorHeightField, isNeutralTone, lutToOklab } from './colorHeight.js';
 import { autoTune, buildTuneTarget, type AutoTuneParams, type AutoTuneResult, type TuneTarget } from './autotune.js';
 import { buildFaceDownModel, formatFaceDownPlan } from './faceDown.js';
@@ -416,20 +416,12 @@ export class EngineCore {
         colorHex: s.colorHex,
         message: `Load ${s.filamentName}`,
       }));
-      const note =
-        template && params.slicerNote !== false
-          ? buildSlicerNote(
-              swapNoteLines({
-                name: params.name,
-                mode: params.swapCommand,
-                firstFilament: `${(stack[0]?.filament ?? FALLBACK_FILAMENT).name}${ams ? ' [1]' : ''}`,
-                swaps: swaps.map((s, i) => ({ ...s, ...(ams ? { slot: slicerSwaps[i].extruder } : {}) })),
-              }),
-              size.width,
-            )
-          : undefined;
+      // No 3D note here: a second object on the plate (even non-printable,
+      // even with no filament of its own) makes Bambu Studio / OrcaSlicer treat
+      // the plate as multi-colour and drops the single-filament per-layer colour
+      // change. The plan travels in custom_gcode_per_layer.xml and
+      // hueCraft_swap_plan.txt instead.
       bytes = export3mf(mesh, {
-        ...(note ? { note } : {}),
         name: params.name,
         swaps: slicerSwaps,
         attachments: { 'Metadata/hueCraft_swap_plan.txt': swapText },

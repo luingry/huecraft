@@ -111,3 +111,9 @@
 - **Symptom:** with 26 layers configured and the top colour (very opaque, e.g. orange-red TD 0.2) starting at layer 13, the preview / layer visibility shows colour only up to layer ~20; lowering the swap of the colour below it lowers that ceiling too.
 - **Cause:** `colorHeightField` picks the layer count with the best colour match (argmin, strict `<`). Once a filament is opaque, extra layers print the same colour, so the first saturated count wins the tie and the luma pull drags it further down. The top band above that count was never used.
 - **Fix:** after the argmin, climb while the printed colour of the next count stays within ΔE_ok 0.01 of the chosen one (`SAME_COLOR_DE2`). Saturated pixels now fill their filament's band up to its last layer (26 for the top colour). The change does not alter the predicted colour, so auto-tune scores are unchanged.
+
+## Swap plan note blocks per-layer colour change in the slicer
+- **Symptom:** a face-up 3MF exported with a slicer template carries the swap plan as 3D text (non-printable object). In Bambu Studio / OrcaSlicer the layer slider no longer offers the single-filament colour change / pause per layer: the plate is treated as multi-colour, even with the note marked as not printable / not sliced.
+- **Cause:** the slicer decides single vs multi-colour mode from the objects on the plate, not from what gets sliced. A second object (even `printable="0"`, same filament) is enough to leave single-extruder mode.
+- **Fix:** face-up exports no longer write the note (`core.ts`); the plan stays in `custom_gcode_per_layer.xml` and `Metadata/hueCraft_swap_plan.txt`. Face-down (parts) exports keep it, since they are multi-filament anyway. Regression test in `engine.test.ts` (one object, one build item).
+- **Avoid:** never add extra objects to a face-up 3MF.

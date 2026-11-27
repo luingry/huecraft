@@ -27,25 +27,6 @@ export function buildSlicerNote(lines: string[], modelWidthMm: number): SlicerNo
   };
 }
 
-const MODE_LABEL = { pause: 'pause and swap by hand', 'color-change': 'M600', ams: 'AMS automatic' } as const;
-
-/** Face-up note: start filament, then each swap with its slicer layer and Z. */
-export function swapNoteLines(input: {
-  name: string;
-  mode: keyof typeof MODE_LABEL;
-  firstFilament: string;
-  swaps: { slicerLayer: number; topZMm: number; filamentName: string; slot?: number }[];
-}): string[] {
-  const slot = (n?: number) => (n ? ` [${n}]` : '');
-  return [
-    `hueCraft: ${input.name}`,
-    `Swaps: ${MODE_LABEL[input.mode]}`,
-    `Layer 1: ${input.firstFilament}`,
-    ...input.swaps.map((s) => `Layer ${s.slicerLayer} Z${s.topZMm.toFixed(2)}: ${s.filamentName}${slot(s.slot)}`),
-    ...(input.swaps.length === 0 ? ['No swaps'] : []),
-  ];
-}
-
 /** Face-down note: which filament goes on each slot. */
 export function faceDownNoteLines(name: string, filaments: { extruder: number; name: string }[]): string[] {
   return [`hueCraft: ${name} (face down)`, ...filaments.map((f) => `Filament ${f.extruder}: ${f.name}`)];
