@@ -87,29 +87,31 @@ describe('export3mf', () => {
     expect(model).toContain('transform="1 0 0 0 1 0 0 0 1 108 108 0"');
   });
 
-  it('writes a note as a modifier part only with a template', () => {
+  it('writes a note as a separate non-printable object only with a template', () => {
     const settings: Record<string, unknown> = { filament_colour: ['#00AE42'], printable_area: ['0x0', '256x0', '256x256', '0x256'] };
     for (let i = 0; i < 30; i++) settings[`k${i}`] = String(i);
     const template = { application: 'BambuStudio-02.08.03.66', settings };
     const note = { name: 'Nota & plano', mesh: buildTextMesh(['A1'], { pixelMm: 1, depthMm: 1, x: 0, y: -3 }) };
     const files = unzipSync(export3mf(mesh, { name: 'Pic', swaps, template, note, sizeMm: { width: 40, height: 40 } }));
     const model = strFromU8(files['3D/3dmodel.model']);
-    expect(model).toMatch(/<object id="3" type="model">\s*<components>\s*<component objectid="1"\/>\s*<component objectid="2"\/>/);
-    expect(model).toContain('<item objectid="3"');
-    // Note at the back-left corner of the 256 mm bed: item offset is 108, margin 1 mm.
-    const noteXml = model.slice(model.indexOf('<object id="2"'), model.indexOf('<object id="3"'));
+    expect(model).not.toContain('<components>');
+    expect(model).toMatch(/<item objectid="1" transform="1 0 0 0 1 0 0 0 1 108 108 0" printable="1"\/>/);
+    expect(model).toContain('<item objectid="2" printable="0"/>');
+    // Note at the back-left corner of the 256 mm bed (no item offset), margin 1 mm.
+    const noteXml = model.slice(model.indexOf('<object id="2"'), model.indexOf('</resources>'));
     const xs = [...noteXml.matchAll(/x="(-?[\d.]+)"/g)].map((m) => Number(m[1]));
     const ys = [...noteXml.matchAll(/y="(-?[\d.]+)"/g)].map((m) => Number(m[1]));
-    expect(Math.min(...xs) + 108).toBeCloseTo(1, 3);
-    expect(Math.max(...ys) + 108).toBeCloseTo(255, 3);
+    expect(Math.min(...xs)).toBeCloseTo(1, 3);
+    expect(Math.max(...ys)).toBeCloseTo(255, 3);
     const cfg = strFromU8(files['Metadata/model_settings.config']);
-    expect(cfg).toMatch(/<part id="1" subtype="normal_part">/);
-    expect(cfg).toMatch(/<part id="2" subtype="modifier_part">\s*<metadata key="name" value="Nota &amp; plano"\/>/);
+    expect(cfg).not.toContain('modifier_part');
+    expect(cfg).toMatch(/<object id="1">[\s\S]*<part id="1" subtype="normal_part">[\s\S]*<\/object>\s*<object id="2">\s*<metadata key="name" value="Nota &amp; plano"\/>/);
+    expect(cfg.match(/<model_instance>/g)).toHaveLength(2);
     // Without a template the note would load as a printed part: left out.
     const plain = unzipSync(export3mf(mesh, { name: 'Pic', swaps, note }));
     expect(plain['Metadata/model_settings.config']).toBeUndefined();
     expect(strFromU8(plain['3D/3dmodel.model'])).not.toContain('Nota');
-    // Parts project: the note follows the filament parts.
+    // Parts project: the note is an object of its own next to the assembly.
     const parts = unzipSync(
       exportBambuPartsProject(mesh, {
         name: 'FD',
@@ -122,8 +124,13 @@ describe('export3mf', () => {
         note,
       }),
     );
-    expect(strFromU8(parts['Metadata/model_settings.config'])).toMatch(/<object id="3">[\s\S]*<part id="2" subtype="modifier_part">/);
-    expect(strFromU8(parts['3D/3dmodel.model']).match(/<component /g)).toHaveLength(2);
+    const partsCfg = strFromU8(parts['Metadata/model_settings.config']);
+    expect(partsCfg).toMatch(/<object id="3">[\s\S]*<part id="1" subtype="normal_part">[\s\S]*<object id="4">\s*<metadata key="name" value="Nota &amp; plano"\/>[\s\S]*<part id="2" subtype="normal_part">/);
+    expect(partsCfg).not.toContain('modifier_part');
+    const root = strFromU8(parts['3D/3dmodel.model']);
+    expect(root).toMatch(/<object id="3" type="model">\s*<components>\s*<component [^>]*objectid="1"[^>]*\/>\s*<\/components>/);
+    expect(root).toMatch(/<object id="4" type="model">\s*<components>\s*<component [^>]*objectid="2"[^>]*\/>\s*<\/components>/);
+    expect(root).toContain('<item objectid="4" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="0"/>');
     expect(strFromU8(parts['3D/Objects/object_1.model'])).toMatch(/<object id="2" type="model">/);
   });
 

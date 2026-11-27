@@ -340,14 +340,14 @@ export interface ThreeMfOptions {
    */
   volumes?: MeshVolume[];
   /**
-   * Visible note (e.g. the swap plan as 3D text) written as a modifier part of
-   * the object: shown in the slicer's 3D view and object list, never printed.
-   * Only used with a template, as part types need a full slicer project.
+   * Visible note (e.g. the swap plan as 3D text) written as a separate object
+   * with a non-printable build item: shown in the slicer's 3D view and object list, never printed.
+   * Only used with a template, as object settings need a full slicer project.
    */
   note?: SlicerNote;
 }
 
-/** Geometry shown in the slicer as a modifier (not printed); moved to the back-left corner of the template bed. */
+/** Geometry shown in the slicer as its own non-printable object; moved to the back-left corner of the template bed. */
 export interface SlicerNote {
   name: string;
   mesh: MeshData;
@@ -405,16 +405,14 @@ export function build3mfModel(mesh: MeshData, opts: ThreeMfOptions = {}): Uint8A
   const volumes = opts.volumes ?? [];
   const note = tpl && volumes.length === 0 ? opts.note : undefined;
   let itemId = 1;
+  let noteItem = '';
   if (note) {
-    // Model and note as two parts of one object; model_settings.config makes
-    // the note a modifier.
-    const c = opts.sizeMm ? bedCentre(tpl!.settings) : null;
-    const offset: [number, number] = c && opts.sizeMm ? [c[0] - opts.sizeMm.width / 2, c[1] - opts.sizeMm.height / 2] : [0, 0];
-    const noteMesh = noteAtBedCorner(note, tpl!.settings, offset);
+    // Model and note as separate objects. The note's build item is not
+    // printable: the slicer shows it but leaves it out of slicing.
     writeMeshObject(w, 1, name, positions, indices, 0, triangleCount - 1, null);
+    const noteMesh = noteAtBedCorner(note, tpl!.settings, [0, 0]);
     writeMeshObject(w, 2, escapeXml(note.name), noteMesh.positions, noteMesh.indices, 0, noteMesh.triangleCount - 1, null);
-    itemId = 3;
-    w.ascii('  <object id="3" type="model">\n   <components>\n    <component objectid="1"/>\n    <component objectid="2"/>\n   </components>\n  </object>\n');
+    noteItem = '  <item objectid="2" printable="0"/>\n';
   } else if (volumes.length === 0) {
     writeMeshObject(w, 1, name, positions, indices, 0, triangleCount - 1, null);
   } else {
@@ -438,7 +436,9 @@ export function build3mfModel(mesh: MeshData, opts: ThreeMfOptions = {}): Uint8A
       w.ascii(' 0"');
     }
   }
-  w.ascii(' printable="1"/>\n </build>\n</model>\n');
+  w.ascii(' printable="1"/>\n');
+  w.ascii(noteItem);
+  w.ascii(' </build>\n</model>\n');
   return w.result();
 }
 
@@ -507,34 +507,49 @@ interface PartSetting {
   modifier?: boolean;
 }
 
-/** Metadata/model_settings.config for one object of normal parts and modifiers on plate 1. */
-function modelSettingsXml(objectId: number, escapedName: string, parts: PartSetting[]): string {
+interface ObjectSetting {
+  id: number;
+  escapedName: string;
+  parts: PartSetting[];
+}
+
+/** Metadata/model_settings.config: objects of normal parts and modifiers, all on plate 1. */
+function modelSettingsXml(objects: ObjectSetting[]): string {
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<config>',
-    `  <object id="${objectId}">`,
-    `    <metadata key="name" value="${escapedName}"/>`,
-    '    <metadata key="extruder" value="1"/>',
-    ...parts.flatMap((p) => [
-      `    <part id="${p.id}" subtype="${p.modifier ? 'modifier_part' : 'normal_part'}">`,
-      `      <metadata key="name" value="${escapeXml(p.name)}"/>`,
-      '      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>',
-      `      <metadata key="extruder" value="${p.extruder}"/>`,
-      '    </part>',
+    ...objects.flatMap((o) => [
+      `  <object id="${o.id}">`,
+      `    <metadata key="name" value="${o.escapedName}"/>`,
+      '    <metadata key="extruder" value="1"/>',
+      ...o.parts.flatMap((p) => [
+        `    <part id="${p.id}" subtype="${p.modifier ? 'modifier_part' : 'normal_part'}">`,
+        `      <metadata key="name" value="${escapeXml(p.name)}"/>`,
+        '      <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>',
+        `      <metadata key="extruder" value="${p.extruder}"/>`,
+        '    </part>',
+      ]),
+      '  </object>',
     ]),
-    '  </object>',
     '  <plate>',
     '    <metadata key="plater_id" value="1"/>',
     '    <metadata key="plater_name" value=""/>',
     '    <metadata key="locked" value="false"/>',
-    '    <model_instance>',
-    `      <metadata key="object_id" value="${objectId}"/>`,
-    '      <metadata key="instance_id" value="0"/>',
-    '    </model_instance>',
+    ...objects.flatMap((o) => [
+      '    <model_instance>',
+      `      <metadata key="object_id" value="${o.id}"/>`,
+      '      <metadata key="instance_id" value="0"/>',
+      '    </model_instance>',
+    ]),
     '  </plate>',
     '</config>',
     '',
   ].join('\n');
+}
+
+/** The note as its own object of one part; its build item is not printable, so it is never sliced. */
+function noteObjectSetting(objectId: number, partId: number, note: SlicerNote): ObjectSetting {
+  return { id: objectId, escapedName: escapeXml(note.name), parts: [{ id: partId, name: note.name, extruder: 1 }] };
 }
 
 function patchedSettings(opts: ThreeMfOptions): string {
@@ -640,7 +655,7 @@ export interface BambuPartsOptions {
   firstLayerHeightMm: number;
   sizeMm: { width: number; height: number };
   attachments?: Record<string, string>;
-  /** Visible note written as a modifier part (see ThreeMfOptions.note). */
+  /** Visible note written as its own non-printable object (see ThreeMfOptions.note). */
   note?: SlicerNote;
 }
 
@@ -654,8 +669,12 @@ export interface BambuPartsOptions {
 export function exportBambuPartsProject(mesh: MeshData, opts: BambuPartsOptions): Uint8Array {
   const { volumes, template, note } = opts;
   const name = escapeXml(opts.name);
-  const partCount = volumes.length + (note ? 1 : 0);
-  const assembly = partCount + 1;
+  const partCount = volumes.length;
+  // The note is its own object (see build3mfModel): a mesh after the parts and
+  // a root object that points at it, after the assembly.
+  const noteMeshId = partCount + 1;
+  const assembly = partCount + (note ? 2 : 1);
+  const noteObjectId = assembly + 1;
   const vertexCount = mesh.positions.length / 3;
 
   const parts = new ByteWriter(vertexCount * 56 + mesh.triangleCount * 50 + 4096);
@@ -665,8 +684,8 @@ export function exportBambuPartsProject(mesh: MeshData, opts: BambuPartsOptions)
   const c = bedCentre(template.settings) ?? [opts.sizeMm.width / 2, opts.sizeMm.height / 2];
   const offset: [number, number] = [c[0] - opts.sizeMm.width / 2, c[1] - opts.sizeMm.height / 2];
   if (note) {
-    const noteMesh = noteAtBedCorner(note, template.settings, offset);
-    writeMeshObject(parts, partCount, escapeXml(note.name), noteMesh.positions, noteMesh.indices, 0, noteMesh.triangleCount - 1, null);
+    const noteMesh = noteAtBedCorner(note, template.settings, [0, 0]);
+    writeMeshObject(parts, noteMeshId, escapeXml(note.name), noteMesh.positions, noteMesh.indices, 0, noteMesh.triangleCount - 1, null);
   }
   parts.ascii(' </resources>\n</model>\n');
 
@@ -684,17 +703,27 @@ export function exportBambuPartsProject(mesh: MeshData, opts: BambuPartsOptions)
     ...Array.from({ length: partCount }, (_, i) => `    <component p:path="/3D/Objects/object_1.model" objectid="${i + 1}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>`),
     '   </components>',
     '  </object>',
+    ...(note
+      ? [
+          `  <object id="${noteObjectId}" type="model">`,
+          '   <components>',
+          `    <component p:path="/3D/Objects/object_1.model" objectid="${noteMeshId}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>`,
+          '   </components>',
+          '  </object>',
+        ]
+      : []),
     ' </resources>',
     ' <build>',
     `  <item objectid="${assembly}" transform="1 0 0 0 1 0 0 0 1 ${tx} ${ty} 0" printable="1"/>`,
+    ...(note ? [`  <item objectid="${noteObjectId}" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="0"/>`] : []),
     ' </build>',
     '</model>',
     '',
   ].join('\n');
 
-  const settings = modelSettingsXml(assembly, name, [
-    ...volumes.map((v, i) => ({ id: i + 1, name: v.name, extruder: v.extruder })),
-    ...(note ? [{ id: partCount, name: note.name, extruder: 1, modifier: true }] : []),
+  const settings = modelSettingsXml([
+    { id: assembly, escapedName: name, parts: volumes.map((v, i) => ({ id: i + 1, name: v.name, extruder: v.extruder })) },
+    ...(note ? [noteObjectSetting(noteObjectId, noteMeshId, note)] : []),
   ]);
 
   const project = settingsWithFilaments(template.settings, opts.filamentColours);
@@ -737,9 +766,9 @@ export function export3mf(mesh: MeshData, opts: ThreeMfOptions = {}): Uint8Array
   if (opts.template) files[PROJECT_SETTINGS_PATH] = strToU8(patchedSettings(opts));
   if (opts.template && opts.note && !opts.volumes?.length) {
     files['Metadata/model_settings.config'] = strToU8(
-      modelSettingsXml(3, escapeXml(opts.name ?? 'hueCraft'), [
-        { id: 1, name: opts.name ?? 'hueCraft', extruder: 1 },
-        { id: 2, name: opts.note.name, extruder: 1, modifier: true },
+      modelSettingsXml([
+        { id: 1, escapedName: escapeXml(opts.name ?? 'hueCraft'), parts: [{ id: 1, name: opts.name ?? 'hueCraft', extruder: 1 }] },
+        noteObjectSetting(2, 2, opts.note),
       ]),
     );
   }
