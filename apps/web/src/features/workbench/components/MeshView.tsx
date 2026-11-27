@@ -1,9 +1,15 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import type { FaceDownPreview, PreviewResult } from '@huecraft/engine';
+import { t } from '../../../i18n';
+import { ToolpathClient } from '../toolpath/client';
+import type { Toolpaths } from '../toolpath/toolpath';
+import { buildTubes, colorTubes } from '../toolpath/tubes';
 
 export type MeshColorMode = 'printed' | 'slicer';
+/** Solid terraced model, or the extrusion lines a slicer would print. */
+export type MeshPathMode = 'solid' | 'lines';
 
 export interface MeshBrush {
   /** Diameter in mm. */
@@ -80,6 +86,8 @@ interface Viewer {
   controls: OrbitControls;
   group: THREE.Group;
   mesh: THREE.Mesh | null;
+  /** Extrusion lines (lines mode), with the paths they were built from. */
+  tubes: { mesh: THREE.Mesh; paths: Toolpaths } | null;
 
   cut: { uCutZ: { value: number }; uCutColor: { value: THREE.Color } };
   sel: SelectionUniforms;
@@ -104,6 +112,8 @@ export function MeshView({
   result,
   faceDown = null,
   colorMode,
+  pathMode = 'solid',
+  lineWidthMm,
   cutLayers,
   maxLayerZ,
   layerZ,
@@ -119,6 +129,8 @@ export function MeshView({
   result: PreviewResult;
   faceDown?: FaceDownPreview | null;
   colorMode: MeshColorMode;
+  pathMode?: MeshPathMode;
+  lineWidthMm: number;
   cutLayers: number;
   maxLayerZ: number;
   /** Z of the top of layer `index` (0-based). */
@@ -190,6 +202,7 @@ export function MeshView({
       controls,
       group,
       mesh: null,
+      tubes: null,
       cut,
       sel,
       cursor,
@@ -569,6 +582,7 @@ export function MeshView({
       ro.disconnect();
       controls.dispose();
       if (v.mesh) disposeTree(v.mesh);
+      if (v.tubes) disposeTree(v.tubes.mesh);
       sel.uSel.value?.dispose();
       for (const ring of [cursor.outer, cursor.inner]) {
         ring.geometry.dispose();
@@ -645,6 +659,8 @@ export function MeshView({
         );
     };
     v.mesh = new THREE.Mesh(geo, mat);
+    // Lines mode keeps the tubes on screen; the solid stays for framing.
+    v.mesh.visible = !v.tubes;
     v.group.add(v.mesh);
 
     const key = `${result.sizeMm.width.toFixed(2)}x${result.sizeMm.height.toFixed(2)}`;
@@ -697,6 +713,82 @@ export function MeshView({
     if (resetToken > 0) viewer.current?.frame();
   }, [resetToken]);
 
+  // Lines mode: slice the layer field in a worker, then swap the solid for tubes.
+  const linesOn = pathMode === 'lines' && !faceDown;
+  const [slicing, setSlicing] = useState(false);
+  const [paths, setPaths] = useState<Toolpaths | null>(null);
+  const toolpathClient = useRef<ToolpathClient | null>(null);
+  useEffect(() => () => toolpathClient.current?.dispose(), []);
+  useEffect(() => {
+    if (!linesOn) {
+      setPaths(null);
+      setSlicing(false);
+      return;
+    }
+    const client = (toolpathClient.current ??= new ToolpathClient());
+    const n = result.totalLayers;
+    const layerTopZ = new Float32Array(n);
+    const layerHeight = new Float32Array(n);
+    for (let k = 0; k < n; k++) {
+      layerTopZ[k] = live.current.layerZ(k);
+      layerHeight[k] = layerTopZ[k] - (k > 0 ? layerTopZ[k - 1] : 0);
+    }
+    let cancelled = false;
+    setSlicing(true);
+    client
+      .build({
+        field: result.layerField.slice(),
+        width: result.width,
+        height: result.height,
+        widthMm: result.sizeMm.width,
+        heightMm: result.sizeMm.height,
+        totalLayers: n,
+        lineWidthMm,
+        layerTopZ,
+        layerHeight,
+      })
+      .then(
+        (tp) => {
+          if (cancelled || !tp) return;
+          setPaths(tp);
+          setSlicing(false);
+        },
+        (e) => {
+          console.error('toolpaths', e);
+          if (!cancelled) setSlicing(false);
+        },
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [linesOn, result, lineWidthMm]);
+
+  useEffect(() => {
+    const v = viewer.current;
+    if (!v) return;
+    if (v.tubes) {
+      v.group.remove(v.tubes.mesh);
+      disposeTree(v.tubes.mesh);
+      v.tubes = null;
+    }
+    if (paths && linesOn) {
+      const { mesh } = buildTubes(paths, lineWidthMm);
+      v.tubes = { mesh, paths };
+      v.group.add(mesh);
+    }
+    if (v.mesh) v.mesh.visible = !v.tubes;
+  }, [paths, linesOn, lineWidthMm, result]);
+
+  // Tube colours and the layer cut (lines above the cut are not drawn).
+  useEffect(() => {
+    const v = viewer.current;
+    if (!v?.tubes) return;
+    const { mesh, paths: tp } = v.tubes;
+    colorTubes(mesh, tp, colorMode === 'printed' ? result.printedLut : result.slicerLut, SRGB_TO_LINEAR);
+    const shown = Math.max(0, Math.min(cutLayers, tp.layerStart.length - 1));
+    (mesh.geometry as THREE.InstancedBufferGeometry).instanceCount = tp.layerStart[shown];
+  }, [paths, linesOn, lineWidthMm, colorMode, cutLayers, result]);
+
   // Brush mode: the left button paints, so orbiting moves to the middle button.
   const brushOn = brush !== null;
   useEffect(() => {
@@ -706,5 +798,10 @@ export function MeshView({
     if (!brushOn) v.cursor.group.visible = false;
   }, [brushOn]);
 
-  return <div ref={mountRef} className="wb-mesh" data-brush={brushOn} />;
+  return (
+    <>
+      <div ref={mountRef} className="wb-mesh" data-brush={brushOn} />
+      {linesOn && slicing && <div className="wb-brush-hint wb-slicing">{t.stage.slicingLines}</div>}
+    </>
+  );
 }

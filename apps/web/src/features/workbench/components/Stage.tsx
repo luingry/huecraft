@@ -23,7 +23,7 @@ import { sortStack } from '../stack';
 import { isClickTool, type BrushTool, type Workbench } from '../useWorkbench';
 import { BrushMenu } from './BrushMenu';
 import { BitmapCanvas, IDENTITY, ImageViewport, RgbaCanvas, type ViewTransform } from './ImageViewport';
-import type { MeshColorMode } from './MeshView';
+import type { MeshColorMode, MeshPathMode } from './MeshView';
 
 // three.js is only needed on the 3D tab; keep it out of the initial bundle.
 const MeshView = lazy(() => import('./MeshView').then((m) => ({ default: m.MeshView })));
@@ -50,6 +50,7 @@ export function Stage({
   const [view, setView] = useState<ViewTransform>(IDENTITY);
   const [hover, setHover] = useState<{ u: number; v: number } | null>(null);
   const [meshColors, setMeshColors] = useState<MeshColorMode>('printed');
+  const [meshPaths, setMeshPaths] = useState<MeshPathMode>('solid');
   const [layerCut, setLayerCut] = useState<number | null>(null);
   const [resetToken, setResetToken] = useState(0);
   const [split, setSplit] = useState(0.5);
@@ -124,6 +125,17 @@ export function Stage({
         )}
         {tab === '3d' && (
           <>
+            {!faceDown && (
+              <Segmented
+                ariaLabel={t.stage.pathMode}
+                value={meshPaths}
+                onChange={setMeshPaths}
+                options={[
+                  { value: 'solid', label: t.stage.solid, title: t.stage.solidHint },
+                  { value: 'lines', label: t.stage.lines, title: t.stage.linesHint },
+                ]}
+              />
+            )}
             <Segmented
               ariaLabel={t.stage.colorMode}
               value={meshColors}
@@ -172,6 +184,8 @@ export function Stage({
                 result={res}
                 faceDown={turned}
                 colorMode={meshColors}
+                pathMode={meshPaths}
+                lineWidthMm={wb.project.print.lineWidthMm}
                 cutLayers={faceDown ? total : cut}
                 maxLayerZ={layerTopZ(wb.project.print, (faceDown ? total : cut) - 1)}
                 layerZ={(i) => layerTopZ(wb.project.print, i)}
