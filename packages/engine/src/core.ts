@@ -22,6 +22,7 @@ import {
   heightForRelief,
   layerFieldToRgba,
   layerHistogram,
+  openThinPeaks,
   type LayerModel,
 } from '@huecraft/optics';
 import { buildSolidHeightfieldMesh, buildTerracedMesh, buildTerracedSolidMesh } from '@huecraft/mesh';
@@ -59,6 +60,17 @@ export function plateauZ(print: PrintParams, totalLayers: number): Float32Array 
   const z = new Float32Array(totalLayers + 1);
   for (let n = 1; n <= totalLayers; n++) z[n] = layerTopZ(print, n - 1);
   return z;
+}
+
+/**
+ * Radius (export grid pixels) of the opening that removes peaks narrower than
+ * one extrusion line. Checked with the Bambu Studio CLI on a 200 mm export at
+ * 0.1 mm pitch: a 0.42 mm disk took the "floating regions" warning away while
+ * changing ~2 % of the samples.
+ */
+export function thinPeakRadiusPx(print: PrintParams, widthMm: number, gridWidth: number): number {
+  const pitch = widthMm / Math.max(1, gridWidth - 1);
+  return print.lineWidthMm / 2 / pitch;
 }
 
 /** Physical size: width is fixed by the user, height follows the source aspect. */
@@ -343,14 +355,19 @@ export class EngineCore {
 
     // Top surface: snapped to the layer top the slicer will print (mid-plane
     // rule), or the raw relief height.
-    const heights = new Float32Array(t.length);
+    // Peaks narrower than one extrusion line are removed (grayscale opening):
+    // the nozzle cannot draw them, and slicers flag the layers above them as
+    // floating regions (Bambu Studio's "has floating regions" warning).
+    const peakRadiusPx = thinPeakRadiusPx(print, size.width, grid.width);
+    let heights = new Float32Array(t.length);
     let maxZ = 0;
-    const field = print.snapToLayers ? computeLayerField(t, model) : null;
+    const field = print.snapToLayers ? openThinPeaks(computeLayerField(t, model), grid.width, grid.height, peakRadiusPx) : null;
     const zOfCount = plateauZ(print, model.totalLayers);
     if (field) {
       for (let i = 0; i < t.length; i++) heights[i] = zOfCount[field[i]];
     } else {
       for (let i = 0; i < t.length; i++) heights[i] = heightForRelief(t[i], model);
+      heights = openThinPeaks(heights, grid.width, grid.height, peakRadiusPx);
     }
     for (let i = 0; i < heights.length; i++) if (heights[i] > maxZ) maxZ = heights[i];
     let mesh = buildSolidHeightfieldMesh({ heights, width: grid.width, height: grid.height, widthMm: size.width, heightMm: size.height });

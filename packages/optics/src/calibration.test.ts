@@ -6,6 +6,7 @@ import {
   computeLineLimitedLayerField,
   layerCountForHeight,
   layerFieldToRgba,
+  openThinPeaks,
   transmissionFactor,
   type LayerModel,
 } from './index.js';
@@ -118,5 +119,39 @@ describe('line-width limit', () => {
     expect(full[5]).toBe(11);
     expect(limited[5]).toBe(limited[0]);
     expect(limited[5]).toBeLessThan(11);
+  });
+});
+
+describe('openThinPeaks', () => {
+  const W = 20;
+  const field = () => new Uint16Array(W * W).fill(3);
+  const set = (f: Uint16Array, x0: number, y0: number, x1: number, y1: number, v: number) => {
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) f[y * W + x] = v;
+  };
+
+  it('removes peaks and ridges narrower than the disk', () => {
+    const f = field();
+    set(f, 5, 5, 5, 5, 9); // single-pixel spike
+    set(f, 10, 2, 11, 17, 8); // 2-pixel-wide ridge
+    const out = openThinPeaks(f, W, W, 1.5);
+    expect(Math.max(...out)).toBe(3);
+  });
+
+  it('keeps plateaus at least one disk wide, and never raises anything', () => {
+    const f = field();
+    set(f, 4, 4, 12, 12, 9);
+    set(f, 8, 8, 8, 8, 1); // a pit is not a peak
+    const out = openThinPeaks(f, W, W, 1.5);
+    expect(out[6 * W + 6]).toBe(9);
+    expect(out[4 * W + 4]).toBe(9); // corners of a square plateau survive a disk this small
+    expect(out[8 * W + 8]).toBe(1);
+    for (let i = 0; i < f.length; i++) expect(out[i]).toBeLessThanOrEqual(f[i]);
+  });
+
+  it('works on float heights and is a no-op below one pixel', () => {
+    const h = new Float32Array(W * W).fill(0.5);
+    h[3 * W + 3] = 2;
+    expect(openThinPeaks(h, W, W, 1.2)[3 * W + 3]).toBeCloseTo(0.5);
+    expect(openThinPeaks(h, W, W, 0.6)[3 * W + 3]).toBeCloseTo(2);
   });
 });

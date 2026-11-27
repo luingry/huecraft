@@ -203,32 +203,23 @@ export function writePrinterDefaults(d: PrinterDefaults): void {
 
 /* ---------- Files ---------- */
 
+/**
+ * Saves through the browser's regular download, so the file shows up in its
+ * downloads list (the File System Access save picker writes directly to disk
+ * and never appears there). Where it lands, or whether to ask, follows the
+ * browser's download settings.
+ */
 export async function saveFile(bytes: Uint8Array | string, fileName: string, mimeType: string): Promise<boolean> {
   const blob = new Blob([bytes as BlobPart], { type: mimeType });
-  const picker = (window as unknown as {
-    showSaveFilePicker?: (o: unknown) => Promise<FileSystemFileHandle>;
-  }).showSaveFilePicker;
-  if (picker) {
-    const ext = fileName.slice(fileName.lastIndexOf('.'));
-    try {
-      const handle = await picker({
-        suggestedName: fileName,
-        types: [{ description: ext.slice(1).toUpperCase(), accept: { [mimeType]: [ext] } }],
-      });
-      const writable = await handle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      return true;
-    } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') return false;
-      // Fall through to a plain download when the picker is blocked.
-    }
-  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = fileName;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  a.remove();
+  // Large exports can take a moment to start downloading; revoke well after.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
   return true;
 }

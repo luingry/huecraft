@@ -152,6 +152,59 @@ export function computeLayerField(t: Float32Array, model: LayerModel): Uint16Arr
 }
 
 /**
+ * Grayscale opening with a disk of radius `radiusPx` (erosion then dilation):
+ * removes every peak, ridge or plateau narrower than the disk and leaves the
+ * rest untouched. Applied to a height or layer field before meshing, it keeps
+ * each level set a union of disks, so every island of a layer rests on a part
+ * of the layer below at least one disk wide. Slicers flag islands that only
+ * stand on something thinner than an extrusion line as floating (Bambu Studio:
+ * "has floating regions"), and the nozzle cannot draw them anyway. Pixels
+ * outside the grid are ignored (edges are not eroded). Returns a new array.
+ */
+export function openThinPeaks<T extends Uint16Array | Float32Array>(values: T, width: number, height: number, radiusPx: number): T {
+  if (!(radiusPx >= 1)) return values.slice() as T;
+  const R = Math.floor(radiusPx);
+  // Disk as horizontal half-widths per row offset.
+  const half: number[] = [];
+  for (let dy = -R; dy <= R; dy++) half.push(Math.floor(Math.sqrt(Math.max(0, radiusPx * radiusPx - dy * dy)) + 1e-9));
+  const widths = [...new Set(half)];
+  const pass = (src: T, takeMin: boolean): T => {
+    const pick = takeMin ? Math.min : Math.max;
+    // Horizontal running min/max for each half-width the disk uses.
+    const rows = new Map<number, T>();
+    for (const k of widths) {
+      const h = new (src.constructor as { new (n: number): T })(src.length);
+      for (let y = 0; y < height; y++) {
+        const row = y * width;
+        for (let x = 0; x < width; x++) {
+          let v = src[row + x];
+          const x0 = x - k < 0 ? 0 : x - k;
+          const x1 = x + k >= width ? width - 1 : x + k;
+          for (let xx = x0; xx <= x1; xx++) v = pick(v, src[row + xx]);
+          h[row + x] = v;
+        }
+      }
+      rows.set(k, h);
+    }
+    const byOffset = half.map((k) => rows.get(k)!);
+    const out = new (src.constructor as { new (n: number): T })(src.length);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let v = src[y * width + x];
+        for (let j = 0; j < half.length; j++) {
+          const yy = y + j - R;
+          if (yy < 0 || yy >= height) continue;
+          v = pick(v, byOffset[j][yy * width + x]);
+        }
+        out[y * width + x] = v;
+      }
+    }
+    return out;
+  };
+  return pass(pass(values, true), false);
+}
+
+/**
  * Nozzle detail limit: features narrower than one extrusion line cannot be
  * printed, so the relief is averaged over blocks of `factor` × `factor` pixels
  * (≈ one line width), quantised to layers, and expanded back (nearest).
