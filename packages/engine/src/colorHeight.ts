@@ -79,6 +79,9 @@ export function linToOklab(r: number, g: number, b: number, out: { [i: number]: 
 /** Weight of the luma pull: a full-range deviation costs ΔE_ok ≈ 0.32 at s = 0.5. */
 export const LUMA_PULL = 0.1;
 
+/** Squared ΔE_ok below which two printed colours count as the same (ΔE_ok 0.01, half a JND). */
+const SAME_COLOR_DE2 = 0.01 * 0.01;
+
 /** OKLab of every entry of an sRGB byte LUT (3 per entry). */
 export function lutToOklab(lut: Uint8Array): Float64Array {
   const n = lut.length / 3;
@@ -143,6 +146,19 @@ export function colorHeightField(
         bestCost = c;
         best = n;
       }
+    }
+    // Once a filament is opaque, more layers of it print the same colour, so
+    // the argmin (and the luma pull) settle on the first saturated count and
+    // the top filament never reaches the max height. Climb while the printed
+    // colour stays the same so each filament fills the layers it was given.
+    const b3 = best * 3;
+    while (best < hi) {
+      const m = (best + 1) * 3;
+      const dl = lutLab[m] - lutLab[b3];
+      const da = lutLab[m + 1] - lutLab[b3 + 1];
+      const db = lutLab[m + 2] - lutLab[b3 + 2];
+      if (dl * dl + da * da + db * db > SAME_COLOR_DE2) break;
+      best++;
     }
     out[i] = tOf[best];
   }

@@ -650,3 +650,39 @@ describe('paint bucket and selection', () => {
     expect(top).toBeGreaterThan(10);
   });
 });
+
+describe('colour-driven heights', () => {
+  // Black base, blue-grey, white, then a very opaque orange-red on top (26 layers).
+  const s: StackEntry[] = [
+    entry('k', 0, '#111111', 0.3),
+    entry('g', 8, '#5a5f70', 0.5),
+    entry('w', 11, '#f2f2f2', 0.7),
+    entry('r', 13, '#f13e03', 0.2),
+  ];
+  const p: PrintParams = { ...DEFAULT_PRINT, maxHeightMm: 2.16, widthMm: 40 };
+  function quads(): SourceImage {
+    const W = 80, H = 20;
+    const rgba = new Uint8ClampedArray(W * H * 4);
+    const cols = [[0xf1, 0x3e, 0x03], [255, 255, 255], [0x5a, 0x5f, 0x70], [0x11, 0x11, 0x11]];
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const c = cols[Math.floor(x / 20)];
+        rgba.set([c[0], c[1], c[2], 255], (y * W + x) * 4);
+      }
+    }
+    return { width: W, height: H, rgba };
+  }
+
+  it('lets the top filament reach the max height once its colour has saturated', () => {
+    for (const cm of [0.95, 1]) {
+      const r = runPreview(quads(), { relief: { ...DEFAULT_RELIEF, colorMatch: cm }, print: p, stack: s, maxEdge: 80, simulateLineWidth: false });
+      expect(r.totalLayers).toBe(26);
+      const red = r.layerField[10 * r.width + 10];
+      expect(red).toBe(26);
+      // White stays on the white band (counts 12..13), it does not climb into red.
+      const white = r.layerField[10 * r.width + 30];
+      expect(white).toBeGreaterThanOrEqual(12);
+      expect(white).toBeLessThanOrEqual(13);
+    }
+  });
+});
